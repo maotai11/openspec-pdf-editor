@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-TW" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenSpec PDF Editor</title>
+  <link rel="stylesheet" href="css/main.css">
+
+  <script>
+    window.onerror = function(msg, src) {
+      if (msg && msg.indexOf('ResizeObserver') !== -1) return true;
+      var errDiv = document.getElementById('load-error');
+      if (errDiv) {
+        errDiv.innerHTML =
+          '<h2>載入失敗</h2>' +
+          '<p>必要的離線函式庫沒有成功載入，請確認建置產物是否完整。</p>' +
+          '<ul>' +
+          '<li>lib/pdf.min.js</li>' +
+          '<li>lib/pdf.worker.min.js</li>' +
+          '<li>lib/pdf-lib.min.js</li>' +
+          '<li>lib/fflate.min.js</li>' +
+          '</ul>' +
+          '<p>來源：' + (src || '未知') + '</p>' +
+          '<p>訊息：' + msg + '</p>' +
+          '<p>可重新執行 <code>npm run get-libs &amp;&amp; npm run build</code> 重新產出離線檔案。</p>';
+        errDiv.style.display = 'flex';
+        document.getElementById('app').style.display = 'none';
+      }
+    };
+  </script>
+</head>
+<body>
+
+<div id="load-error" style="
+  display:none; position:fixed; inset:0; background:#fff;
+  flex-direction:column; align-items:center; justify-content:center;
+  gap:16px; padding:32px; font-family:system-ui; text-align:center;
+  z-index:9999;
+"></div>
+
+<div id="app">
+  <nav id="menubar" role="menubar" aria-label="主選單">
+    <div class="app-brand" aria-label="OpenSpec PDF Editor">OpenSpec PDF Editor</div>
+  </nav>
+
+  <div id="toolbar" role="toolbar" aria-label="工具列"></div>
+
+  <div id="workspace">
+    <aside id="sidebar" aria-label="頁面縮圖">
+      <div id="thumbnail-panel" role="list" aria-label="PDF 頁面縮圖清單"></div>
+    </aside>
+
+    <main id="editor-stage" role="main" aria-label="PDF 編輯區" aria-dropeffect="copy">
+      <div id="empty-state" aria-label="尚未開啟文件">
+        <div class="empty-state-icon">PDF</div>
+        <div class="empty-state-title">開啟 PDF 後即可開始編輯</div>
+        <div class="empty-state-hint">支援 PDF、PNG、JPG、WebP，單檔上限 150 MB</div>
+        <button class="btn btn-primary" id="btn-open-pdf" aria-label="開啟 PDF">
+          開啟 PDF
+        </button>
+      </div>
+
+      <div id="progress-overlay" class="progress-overlay hidden" aria-live="polite" aria-busy="true">
+        <div class="progress-label" id="progress-label">正在載入…</div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div id="layer-host">
+        <div id="canvas-layer-root" role="img" aria-label="PDF 頁面預覽" tabindex="0"></div>
+        <div id="annotation-layer-root" aria-label="標註圖層"></div>
+      </div>
+    </main>
+
+    <aside id="inspector" aria-label="屬性面板"></aside>
+  </div>
+
+  <div id="statusbar" role="status">
+    <span class="statusbar-segment">
+      <span aria-live="polite" id="status-page">—</span>
+    </span>
+    <span class="statusbar-segment">
+      <span aria-live="polite" id="status-zoom">—</span>
+    </span>
+    <span style="flex:1"></span>
+    <span class="statusbar-segment" id="status-filename">尚未開啟文件</span>
+    <span class="statusbar-segment">
+      <span class="statusbar-dot" id="status-dot"></span>
+      <span id="status-save">未儲存</span>
+    </span>
+  </div>
+</div>
+
+<div id="toast-host" aria-live="assertive" aria-atomic="true"></div>
+
+<div id="password-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="password-modal-title">
+  <div class="modal">
+    <div class="modal-title" id="password-modal-title">此 PDF 需要密碼</div>
+    <div class="form-group">
+      <label class="form-label" for="password-input">請輸入密碼</label>
+      <input id="password-input" class="form-input" type="password" placeholder="PDF 密碼" autocomplete="off">
+      <span id="password-error" style="color:var(--color-danger);font-size:var(--text-sm);display:none">密碼錯誤，請重新輸入</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="password-cancel">取消</button>
+      <button class="btn btn-primary" id="password-submit">確認</button>
+    </div>
+  </div>
+</div>
+
+<div id="workflow-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="workflow-modal-title">
+  <div class="modal modal-wide">
+    <div class="workflow-modal-header">
+      <div class="modal-title" id="workflow-modal-title">工作流程設定</div>
+      <p class="workflow-modal-description" id="workflow-modal-description"></p>
+    </div>
+    <div id="workflow-modal-body" class="workflow-modal-body"></div>
+    <div id="workflow-modal-error" class="workflow-modal-error hidden" aria-live="polite"></div>
+    <div class="modal-actions">
+      <button class="btn" id="workflow-cancel">取消</button>
+      <button class="btn btn-primary" id="workflow-submit">套用</button>
+    </div>
+  </div>
+</div>
+
+<script src="lib/fflate.min.js"></script>
+<script src="lib/pdf-lib.min.js"></script>
+<script src="lib/pdf.min.js"></script>
+<script src="js/app.bundle.js"></script>
+
+</body>
+</html>

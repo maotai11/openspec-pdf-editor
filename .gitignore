@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (keep dist/ -- it's the deployable offline product)
+tmp/
+
+# Test output
+output/
+test-results/
+*.pdf
+
+# Dev tool logs
+.playwright-cli/
+.autonomous/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.local

@@ -1,0 +1,29 @@
+{
+  "name": "openspec-pdf-editor",
+  "version": "0.1.0",
+  "description": "Offline PDF editor — runs directly from file:// with no server or install",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/unit/**/*.test.js",
+    "test:watch": "node --test --watch tests/unit/**/*.test.js",
+    "get-libs": "node scripts/get-libs.js",
+    "build": "node scripts/build.js",
+    "integrity": "node scripts/gen-integrity.js",
+    "dev": "npm run get-libs && npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  },
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "@pdfsmaller/pdf-encrypt-lite": "^1.0.2",
+    "docx": "^9.6.1",
+    "pptxgenjs": "^4.0.1",
+    "xlsx": "^0.18.5"
+  }
+}
