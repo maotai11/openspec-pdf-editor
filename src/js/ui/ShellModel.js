@@ -34,6 +34,8 @@ export function buildMenuModel(state) {
         { id: 'rotate-ccw', label: '逆時針旋轉 90°', disabled: !hasDoc },
         { id: 'crop-pages', label: '裁切頁面', disabled: !hasDoc },
         { id: 'delete-page', label: '刪除頁面', disabled: !hasDoc || pageCount <= 1 },
+        { type: 'separator' },
+        { id: 'batch-move-pages-dialog', label: '批量移動頁面…', disabled: !hasDoc },
       ],
     },
     {
@@ -82,6 +84,8 @@ export function buildMenuModel(state) {
         { id: 'protect-pdf', label: '保護 PDF', disabled: !hasDoc },
         { type: 'separator' },
         { id: 'clear-sessions', label: '清除暫存工作階段' },
+        { type: 'separator' },
+        { id: 'show-signature-manifest', label: '簽署記錄', disabled: !hasDoc },
         { type: 'separator' },
         { id: 'about', label: '關於 OpenSpec' },
       ],

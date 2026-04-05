@@ -62,6 +62,10 @@ let signaturePresetDraft = buildTypedSignaturePreset({
     day: '2-digit',
   }).format(new Date()).replaceAll('/', '.'),
 });
+
+// Signature manifest: records every signature placed in this session
+// [{ signerName, title, reason, location, signedAt, pageNumber }]
+let signatureManifest = [];
 const PAGE_NUMBER_POSITIONS = [
   ['bottom-left', '下方靠左'],
   ['bottom-center', '下方置中'],
@@ -1787,8 +1791,8 @@ async function openSignatureDialog() {
     }).format(new Date()).replaceAll('/', '.');
 
   return showWorkflowDialog({
-    title: '建立電子簽署',
-    description: '可建立打字簽名、手寫簽名或圖片簽名。確認後回到文件頁面拖曳放置範圍。',
+    title: '完整電子簽署',
+    description: '設定簽名外觀及簽署資訊。確認後回到文件頁面拖曳放置範圍，並自動記錄於簽署記錄。',
     submitLabel: '使用這個簽名',
     buildContent(body) {
       const layout = el('div', 'workflow-grid');
@@ -1974,15 +1978,42 @@ async function openSignatureDialog() {
       dateInput.addEventListener('input', syncPreview);
       drawCanvas.addEventListener('pointerup', syncPreview);
 
+      // ---- 簽署資訊欄位（事由、地點、職稱）----
+      const sigTitleInput = document.createElement('input');
+      sigTitleInput.type = 'text';
+      sigTitleInput.className = 'form-input';
+      sigTitleInput.placeholder = '例：主任、經理（可留空）';
+      sigTitleInput.value = signaturePresetDraft?.sigTitle ?? '';
+
+      const sigReasonInput = document.createElement('input');
+      sigReasonInput.type = 'text';
+      sigReasonInput.className = 'form-input';
+      sigReasonInput.placeholder = '例：核准、審閱、確認（可留空）';
+      sigReasonInput.value = signaturePresetDraft?.sigReason ?? '';
+
+      const sigLocationInput = document.createElement('input');
+      sigLocationInput.type = 'text';
+      sigLocationInput.className = 'form-input';
+      sigLocationInput.placeholder = '例：台北辦公室（可留空）';
+      sigLocationInput.value = signaturePresetDraft?.sigLocation ?? '';
+
       left.appendChild(el('div', 'workflow-section-title', '簽名來源'));
       left.appendChild(buildFormGroup('簽名模式', modeSelect));
       left.appendChild(modeGroups.typed);
       left.appendChild(modeGroups.drawn);
       left.appendChild(modeGroups.image);
 
+      left.appendChild(el('div', 'workflow-section-title', '簽署資訊（嵌入 PDF 元數據）'));
+      left.appendChild(buildFormGroup('職稱', sigTitleInput));
+      left.appendChild(buildFormGroup('簽署事由', sigReasonInput));
+      left.appendChild(buildFormGroup('簽署地點', sigLocationInput));
+
       right.appendChild(el('div', 'workflow-section-title', '簽名預覽'));
       right.appendChild(preview);
       right.appendChild(el('p', 'workflow-help', '確認後切換到簽署工具，回到頁面拖曳放置範圍。'));
+      right.appendChild(el('p', 'workflow-help',
+        '簽署資訊（事由、地點、職稱）將記錄至簽署記錄，並在儲存時嵌入 PDF 元數據。'
+      ));
 
       layout.appendChild(left);
       layout.appendChild(right);
@@ -1993,7 +2024,11 @@ async function openSignatureDialog() {
       return {
         focus() { signerInput.focus(); signerInput.select(); },
         getValue() {
-          return buildPreset();
+          const preset = buildPreset();
+          preset.sigTitle    = sigTitleInput.value.trim();
+          preset.sigReason   = sigReasonInput.value.trim();
+          preset.sigLocation = sigLocationInput.value.trim();
+          return preset;
         },
         validate(value) {
           if (modeSelect.value === 'typed' && !String(value.signerName ?? '').trim()) {
@@ -2486,8 +2521,50 @@ function clearThumbnailPanel() {
 function cleanupThumbnailDragState() {
   const panel = document.getElementById('thumbnail-panel');
   delete panel.dataset.dragPage;
-  panel.querySelectorAll('.thumbnail-item.dragging, .thumbnail-item.drop-target').forEach((item) => {
-    item.classList.remove('dragging', 'drop-target');
+  delete panel.dataset.dragBatch;
+  panel.querySelectorAll('.thumbnail-item.dragging, .thumbnail-item.drop-target, .thumbnail-item.dragging-ghost').forEach((item) => {
+    item.classList.remove('dragging', 'drop-target', 'dragging-ghost');
+  });
+}
+
+/**
+ * Dialog: ask user where to move the currently selected pages.
+ * Returns target page number (integer, insert after) or null if cancelled.
+ */
+async function openBatchMoveDialog(selectedPages, pageCount) {
+  return showWorkflowDialog({
+    title: '批量移動頁面',
+    description: `已選取 ${selectedPages.length} 頁（${selectedPages.slice(0, 5).join('、')}${selectedPages.length > 5 ? '…' : ''}）。請指定插入位置。`,
+    submitLabel: '移動',
+    buildContent(body) {
+      const row = el('div', 'workflow-grid');
+
+      const targetInput = document.createElement('input');
+      targetInput.type = 'number';
+      targetInput.className = 'form-input';
+      targetInput.min = '0';
+      targetInput.max = String(pageCount);
+      targetInput.placeholder = `0（第 1 頁前）～ ${pageCount}`;
+      targetInput.value = '';
+
+      const hint = el('p', 'workflow-help',
+        `輸入 0 表示移到第 1 頁之前，輸入 ${pageCount} 表示移到最後一頁之後。`
+      );
+
+      row.appendChild(buildFormGroup('插入到第 N 頁之後（0 = 文件開頭）', targetInput));
+      body.appendChild(row);
+      body.appendChild(hint);
+
+      return {
+        focus() { targetInput.focus(); targetInput.select(); },
+        getValue() { return Number(targetInput.value); },
+        validate(v) {
+          if (isNaN(v) || v < 0 || v > pageCount) return `請輸入 0 到 ${pageCount} 之間的整數。`;
+          if (selectedPages.includes(v)) return `目標頁 ${v} 本身在選取範圍內，請選擇其他位置。`;
+          return '';
+        },
+      };
+    },
   });
 }
 
@@ -2557,8 +2634,19 @@ function buildThumbnailItem(pageNumber) {
 
   item.addEventListener('dragstart', (event) => {
     const panel = document.getElementById('thumbnail-panel');
+    const selected = stateManager.state.selectedPageNumbers ?? [];
+    // If dragging a page that is part of a multi-selection, batch-move all selected
+    const isBatch = selected.length > 1 && selected.includes(pageNumber);
     panel.dataset.dragPage = String(pageNumber);
+    panel.dataset.dragBatch = isBatch ? selected.join(',') : '';
     item.classList.add('dragging');
+    if (isBatch) {
+      // Visually mark all selected items as dragging
+      selected.forEach(p => {
+        const el = panel.querySelector(`[data-page="${p}"]`);
+        if (el && p !== pageNumber) el.classList.add('dragging-ghost');
+      });
+    }
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData('text/plain', String(pageNumber));
   });
@@ -2576,15 +2664,25 @@ function buildThumbnailItem(pageNumber) {
 
   item.addEventListener('drop', (event) => {
     event.preventDefault();
-    const fromPage = Number(event.dataTransfer.getData('text/plain') || document.getElementById('thumbnail-panel').dataset.dragPage || 0);
+    const panel = document.getElementById('thumbnail-panel');
+    const fromPage = Number(event.dataTransfer.getData('text/plain') || panel.dataset.dragPage || 0);
+    const batchRaw = panel.dataset.dragBatch || '';
     item.classList.remove('drop-target');
     cleanupThumbnailDragState();
     if (!fromPage || fromPage === pageNumber) return;
-    eventBus.emit('ui:action', { action: 'reorder-page', fromPage, toPage: pageNumber });
+    if (batchRaw) {
+      const fromPages = batchRaw.split(',').map(Number).filter(Boolean);
+      eventBus.emit('ui:action', { action: 'batch-move-pages', fromPages, toPage: pageNumber });
+    } else {
+      eventBus.emit('ui:action', { action: 'reorder-page', fromPage, toPage: pageNumber });
+    }
   });
 
   item.addEventListener('dragend', () => {
     cleanupThumbnailDragState();
+    // Clear ghost class
+    document.getElementById('thumbnail-panel')
+      .querySelectorAll('.dragging-ghost').forEach(el => el.classList.remove('dragging-ghost'));
   });
 
 
@@ -2855,11 +2953,73 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
       if (!preset) break;
       signaturePresetDraft = structuredClone(preset);
       annotationLayer.setSignaturePreset(preset);
+      // Record into signature manifest
+      const manifestEntry = {
+        signerName: preset.signerName ?? '簽署者',
+        title:      preset.sigTitle ?? '',
+        reason:     preset.sigReason ?? '',
+        location:   preset.sigLocation ?? '',
+        signedAt:   new Intl.DateTimeFormat('zh-TW', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit',
+        }).format(new Date()).replaceAll('/', '.'),
+        pageNumber: state.currentPage,
+      };
+      signatureManifest.push(manifestEntry);
+      // Embed metadata into PDF (non-blocking, best-effort)
+      try { documentEngine.embedSignatureMetadata(signatureManifest); } catch { /* non-critical */ }
+      // Update status bar to show signed indicator
+      renderSignedStatusBadge();
+
       stateManager.patch({ selectedTool: 'signature', toolHubTab: 'esign' });
       document.getElementById('annotation-layer-root')
         .querySelector('svg')
         ?.style.setProperty('cursor', 'crosshair');
-      appRenderer.toast('已切換到電子簽署工具，請回到頁面拖曳放置範圍。', 'success');
+      appRenderer.toast(
+        `已切換到電子簽署工具（${manifestEntry.signerName}，共 ${signatureManifest.length} 筆記錄）。請回到頁面拖曳放置範圍。`,
+        'success'
+      );
+      break;
+    }
+
+    case 'show-signature-manifest': {
+      // Show dialog with all signature records
+      if (signatureManifest.length === 0) {
+        appRenderer.toast('尚無簽署記錄。使用電子簽署工具後將自動記錄。', 'info');
+        break;
+      }
+      await showWorkflowDialog({
+        title: '簽署記錄',
+        description: `本文件共 ${signatureManifest.length} 筆簽署記錄。`,
+        submitLabel: '關閉',
+        buildContent(body) {
+          const table = document.createElement('table');
+          table.style.cssText = 'width:100%;border-collapse:collapse;font-size:var(--text-sm)';
+          const thead = table.createTHead();
+          const hrow = thead.insertRow();
+          ['#','簽署者','職稱','事由','地點','時間','頁碼'].forEach(h => {
+            const th = document.createElement('th');
+            th.textContent = h;
+            th.style.cssText = 'padding:6px 8px;border-bottom:1px solid var(--color-border);text-align:left;white-space:nowrap';
+            hrow.appendChild(th);
+          });
+          const tbody = table.createTBody();
+          signatureManifest.forEach((m, i) => {
+            const row = tbody.insertRow();
+            [i + 1, m.signerName, m.title, m.reason, m.location, m.signedAt, `第 ${m.pageNumber} 頁`].forEach(v => {
+              const td = row.insertCell();
+              td.textContent = v || '—';
+              td.style.cssText = 'padding:6px 8px;border-bottom:1px solid var(--color-border)';
+            });
+          });
+          body.appendChild(table);
+          return {
+            focus() {},
+            getValue() { return true; },
+            validate() { return ''; },
+          };
+        },
+      });
       break;
     }
     case 'set-tool-hub-tab':
@@ -2944,6 +3104,41 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
         appRenderer.toast(`移動頁面失敗：${err.message}`, 'error');
       }
       break;
+
+    case 'batch-move-pages': {
+      const pages = Array.isArray(value?.fromPages) ? value.fromPages
+        : Array.isArray(fromPages) ? fromPages
+        : (stateManager.state.selectedPageNumbers ?? []);
+      if (pages.length === 0) break;
+
+      // toPage may come from drag-drop directly or must be asked
+      let targetPage = typeof toPage === 'number' ? toPage : null;
+      if (targetPage === null) {
+        targetPage = await openBatchMoveDialog(pages, state.pageCount);
+        if (targetPage === null) break;
+      }
+      try {
+        await runUndoableDocumentMutation({
+          description: `批量移動 ${pages.length} 頁到第 ${targetPage} 頁後`,
+          mutate: () => documentEngine.reorderPages(pages, targetPage),
+          successMessage: `已將 ${pages.length} 頁移動到第 ${targetPage} 頁之後`,
+        });
+      } catch (err) {
+        appRenderer.toast(`批量移動頁面失敗：${err.message}`, 'error');
+      }
+      break;
+    }
+
+    case 'batch-move-pages-dialog': {
+      // Triggered from menu / keyboard shortcut — opens dialog for currently selected pages
+      const selPages = stateManager.state.selectedPageNumbers ?? [];
+      if (selPages.length === 0) {
+        appRenderer.toast('請先在縮圖面板選取頁面（Ctrl/Shift + 點擊）', 'info');
+        break;
+      }
+      eventBus.emit('ui:action', { action: 'batch-move-pages', fromPages: selPages });
+      break;
+    }
     case 'update-selected-annotation': {
       const id = state.selectedAnnotationIds[0];
       if (!id || !patch) break;
@@ -3237,11 +3432,44 @@ annotationLayer.init(canvasLayer, documentEngine);
   console.log('[OpenSpec] Ready. Capabilities:', capabilities);
 }
 
+/** Show a signed badge in statusbar when signatureManifest is non-empty. */
+function renderSignedStatusBadge() {
+  const bar = document.getElementById('statusbar');
+  if (!bar) return;
+  let badge = bar.querySelector('#status-signed-badge');
+  if (signatureManifest.length === 0) {
+    badge?.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.id = 'status-signed-badge';
+    badge.className = 'statusbar-segment statusbar-signed';
+    badge.title = '點擊查看簽署記錄';
+    badge.style.cssText = 'cursor:pointer;color:var(--color-success,#16a34a);font-weight:600';
+    badge.addEventListener('click', () => eventBus.emit('ui:action', { action: 'show-signature-manifest' }));
+    // Insert before last segment (save status)
+    const segments = bar.querySelectorAll('.statusbar-segment');
+    const last = segments[segments.length - 1];
+    bar.insertBefore(badge, last);
+  }
+  badge.textContent = `✓ 已簽署 ${signatureManifest.length} 筆`;
+}
+
 main().catch(err => {
   console.error('[OpenSpec] Fatal init error:', err);
-  document.getElementById('load-error').innerHTML =
-    `<h2>載入失敗</h2><p>${err.message}</p>`;
-  document.getElementById('load-error').style.display = 'flex';
-  document.getElementById('app').style.display = 'none';
+  // XSS-safe: use textContent instead of innerHTML for error message
+  const errDiv = document.getElementById('load-error');
+  if (errDiv) {
+    const h2 = document.createElement('h2');
+    h2.textContent = '載入失敗';
+    const p = document.createElement('p');
+    p.textContent = err.message;
+    errDiv.innerHTML = '';
+    errDiv.appendChild(h2);
+    errDiv.appendChild(p);
+    errDiv.style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+  }
 });
 

@@ -1000,6 +1000,80 @@ class DocumentEngine {
     await this.#reloadFromPdfLib(toPage);
   }
 
+  /**
+   * Move a group of pages to a target position. All params are 1-based.
+   * @param {number[]} fromPages - Array of page numbers to move (order preserved).
+   * @param {number}   toPage    - Insert AFTER this page (0 = prepend before page 1).
+   */
+  async reorderPages(fromPages, toPage) {
+    if (!this.#pdfLibDoc) throw new Error('No document loaded.');
+    const count = this.#pdfLibDoc.getPageCount();
+
+    // Deduplicate, validate, sort ascending
+    const sorted = [...new Set(fromPages)]
+      .map(Number)
+      .filter(p => p >= 1 && p <= count)
+      .sort((a, b) => a - b);
+    if (sorted.length === 0) return;
+
+    // toPage 0 = prepend; clamp to valid range
+    const target = Math.max(0, Math.min(count, Number(toPage) || 0));
+    const fromSet = new Set(sorted);
+
+    // Don't move if every selected page is already consecutive at the target
+    const firstInsert = target - sorted.filter(p => p <= target).length;
+    const alreadyInPlace = sorted.every((p, i) => p === firstInsert + 1 + i);
+    if (alreadyInPlace) return;
+
+    // Copy pages in original (ascending) order
+    const copies = await this.#pdfLibDoc.copyPages(
+      this.#pdfLibDoc,
+      sorted.map(p => p - 1),
+    );
+
+    // Remove from highest → lowest index to avoid shifting
+    for (const p of [...sorted].sort((a, b) => b - a)) {
+      this.#pdfLibDoc.removePage(p - 1);
+    }
+
+    // Adjusted insert index: target minus how many fromPages were ≤ target
+    const pagesBeforeTarget = sorted.filter(p => p <= target).length;
+    const insertIdx = target - pagesBeforeTarget;
+
+    for (let i = 0; i < copies.length; i++) {
+      this.#pdfLibDoc.insertPage(
+        Math.min(insertIdx + i, this.#pdfLibDoc.getPageCount()),
+        copies[i],
+      );
+    }
+
+    const newFirstPage = insertIdx + 1;
+    eventBus.emit('document:structure-changed', { type: 'reorder-pages', fromPages: sorted, toPage: target });
+    await this.#reloadFromPdfLib(newFirstPage);
+  }
+
+  /**
+   * Embed electronic-signature metadata into the PDF Info dictionary.
+   * Call before exportToBlob when a document has been signed.
+   * @param {{ signerName: string, reason: string, location: string, signedAt: string }[]} manifests
+   */
+  embedSignatureMetadata(manifests = []) {
+    if (!this.#pdfLibDoc || !manifests.length) return;
+    const latest = manifests[manifests.length - 1];
+    try {
+      this.#pdfLibDoc.setAuthor(latest.signerName || '');
+      this.#pdfLibDoc.setSubject(
+        manifests.map(m =>
+          `[簽署] ${m.signerName}${m.reason ? ' / ' + m.reason : ''}${m.location ? ' @ ' + m.location : ''} ${m.signedAt}`
+        ).join(' | ')
+      );
+      this.#pdfLibDoc.setKeywords(['電子簽署', 'OpenSpec', ...manifests.map(m => m.signerName)]);
+      this.#pdfLibDoc.setModificationDate(new Date());
+    } catch {
+      // Non-critical; metadata embedding may fail on encrypted docs
+    }
+  }
+
   /** Merge another PDF (ArrayBuffer) into this document. */
   async mergePdf(otherBytes, currentPage = 1) {
     if (!this.#pdfLibDoc) throw new Error('No document loaded.');

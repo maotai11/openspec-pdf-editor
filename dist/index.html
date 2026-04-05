@@ -3,26 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: block inline eval, restrict sources to self (offline file:// compatible) -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'none'; object-src 'none';">
   <title>OpenSpec PDF Editor</title>
   <link rel="stylesheet" href="css/main.css">
 
   <script>
+    // XSS-safe error handler: use textContent, never innerHTML with user/external data
     window.onerror = function(msg, src) {
       if (msg && msg.indexOf('ResizeObserver') !== -1) return true;
       var errDiv = document.getElementById('load-error');
       if (errDiv) {
-        errDiv.innerHTML =
-          '<h2>載入失敗</h2>' +
-          '<p>必要的離線函式庫沒有成功載入，請確認建置產物是否完整。</p>' +
-          '<ul>' +
-          '<li>lib/pdf.min.js</li>' +
-          '<li>lib/pdf.worker.min.js</li>' +
-          '<li>lib/pdf-lib.min.js</li>' +
-          '<li>lib/fflate.min.js</li>' +
-          '</ul>' +
-          '<p>來源：' + (src || '未知') + '</p>' +
-          '<p>訊息：' + msg + '</p>' +
-          '<p>可重新執行 <code>npm run get-libs &amp;&amp; npm run build</code> 重新產出離線檔案。</p>';
+        function txt(tag, content) {
+          var el = document.createElement(tag);
+          el.textContent = content;
+          return el;
+        }
+        errDiv.innerHTML = '';
+        errDiv.appendChild(txt('h2', '載入失敗'));
+        errDiv.appendChild(txt('p', '必要的離線函式庫沒有成功載入，請確認建置產物是否完整。'));
+        var ul = document.createElement('ul');
+        ['lib/pdf.min.js','lib/pdf.worker.min.js','lib/pdf-lib.min.js','lib/fflate.min.js']
+          .forEach(function(f){ var li=document.createElement('li'); li.textContent=f; ul.appendChild(li); });
+        errDiv.appendChild(ul);
+        errDiv.appendChild(txt('p', '來源：' + (src || '未知')));
+        errDiv.appendChild(txt('p', '訊息：' + (msg || '')));
+        var hint = document.createElement('p');
+        var code = document.createElement('code');
+        code.textContent = 'npm run get-libs && npm run build';
+        hint.textContent = '可重新執行 ';
+        hint.appendChild(code);
+        hint.appendChild(document.createTextNode(' 重新產出離線檔案。'));
+        errDiv.appendChild(hint);
         errDiv.style.display = 'flex';
         document.getElementById('app').style.display = 'none';
       }
