@@ -1,18 +1,18 @@
 {
   "version": "0.1.0",
-  "generatedAt": "2026-04-06T05:40:51.131Z",
+  "generatedAt": "2026-04-06T06:16:52.843Z",
   "files": {
     "css/main.css": {
-      "sha256": "9ffe09cb7a6dfddbecdecd8e8cc8d29e008875fbd4b9f25d09510841bcc5bef1",
-      "bytes": 25818
+      "sha256": "39c13aa59a7e7a7981a73fc368968059627d42c91700fe151eca87952c77e3ad",
+      "bytes": 27118
     },
     "index.html": {
       "sha256": "21bf20787e5f2c8c1a424779b60a51a1afde01c9316403c866989061b3a29ade",
       "bytes": 6270
     },
     "js/app.bundle.js": {
-      "sha256": "0f88ffdab28ddd1d182d51a87f87f18c61e65c5bc364da535b9471716d9359ad",
-      "bytes": 14298281
+      "sha256": "95bcac8453b9a0ec2d8ecd2ccf346b5f965be537d5eefd18c35b45ec5ab5d990",
+      "bytes": 14303361
     },
     "js/app.js": {
       "sha256": "9c5ac2dcaf85cace54fb861cf9031efa5731097764ba6bb1a2bf6349c31e8089",

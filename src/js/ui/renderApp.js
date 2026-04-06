@@ -137,12 +137,25 @@ export class AppRenderer {
 
     const controls = document.createElement('div');
     controls.className = 'inspector-controls';
-    if (annotation.type !== 'signature') {
-      controls.appendChild(this.#buildColorField(annotation.type, annotation.style?.color ?? '#000000'));
-    }
 
-    if (typeof annotation.style?.opacity === 'number') {
-      controls.appendChild(this.#buildRangeField(annotation.type === 'highlight' ? '標記透明度' : '透明度', 'opacity', annotation.style.opacity, 0, 1, 0.05));
+    if (annotation.type === 'signature') {
+      // Signature info card
+      if (annotation.signerName) {
+        const sigInfo = document.createElement('div');
+        sigInfo.className = 'inspector-sig-info';
+        sigInfo.innerHTML = `
+          <div class="inspector-field"><span>簽署人</span><strong>${annotation.signerName}</strong></div>
+          ${annotation.signedAt ? `<div class="inspector-field"><span>簽署時間</span><strong>${new Date(annotation.signedAt).toLocaleString('zh-TW')}</strong></div>` : ''}
+          ${annotation.signatureType ? `<div class="inspector-field"><span>方式</span><strong>${annotation.signatureType === 'draw' ? '手繪' : annotation.signatureType === 'type' ? '輸入' : annotation.signatureType}</strong></div>` : ''}
+        `;
+        controls.appendChild(sigInfo);
+      }
+      controls.appendChild(this.#buildRangeField('透明度', 'opacity', annotation.style?.opacity ?? 1, 0, 1, 0.05));
+    } else {
+      controls.appendChild(this.#buildColorField(annotation.type, annotation.style?.color ?? '#000000'));
+      if (typeof annotation.style?.opacity === 'number') {
+        controls.appendChild(this.#buildRangeField(annotation.type === 'highlight' ? '標記透明度' : '透明度', 'opacity', annotation.style.opacity, 0, 1, 0.05));
+      }
     }
 
     if (annotation.type === 'draw' || annotation.type === 'rect' || annotation.type === 'line' || annotation.type === 'arrow' || annotation.type === 'underline' || annotation.type === 'circle' || annotation.type === 'stamp') {
@@ -462,11 +475,11 @@ export class AppRenderer {
 
     for (const tool of model.tools) {
       const btn = document.createElement('button');
-      btn.className = 'tool-btn' + (tool.active ? ' active' : '');
+      btn.className = 'tool-btn tool-btn--annotate' + (tool.active ? ' active' : '');
       btn.setAttribute('data-tool', tool.id);
       btn.setAttribute('aria-label', tool.label);
       btn.setAttribute('title', tool.label);
-      btn.textContent = tool.icon;
+      btn.innerHTML = `<span class="tool-btn-icon" aria-hidden="true">${tool.icon}</span><span class="tool-btn-label">${tool.label}</span>`;
       if (tool.disabled) btn.setAttribute('disabled', '');
       btn.addEventListener('click', () => {
         eventBus.emit('ui:action', { action: `tool-${tool.id}` });

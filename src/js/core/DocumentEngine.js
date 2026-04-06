@@ -576,22 +576,34 @@ class DocumentEngine {
         { x: g.width, y: g.height },
         { x: 0, y: g.height },
       ].map((point) => rotatePoint(point, center, rotation)));
+      // Mirror AnnotationLayer#buildStampElement proportions exactly
+      const hasDate = lines.length > 1;
+      const line1Y = hasDate ? g.height * 0.42 : g.height * 0.54;
+      const line2Y = g.height * 0.74;
+      const dividerY = g.height * 0.56;
       const svg = [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${bounds.width}" height="${bounds.height}" viewBox="0 0 ${bounds.width} ${bounds.height}">`,
         `<g transform="translate(${-bounds.minX} ${-bounds.minY})">`,
         `<g transform="rotate(${rotation} ${center.x} ${center.y})">`,
         `<ellipse cx="${center.x}" cy="${center.y}" rx="${g.width / 2}" ry="${g.height / 2}" fill="none" stroke="${color}" stroke-width="${strokeWidth}"/>`,
-        `<line x1="${g.width * 0.18}" y1="${g.height * 0.56}" x2="${g.width * 0.82}" y2="${g.height * 0.56}" stroke="${color}" stroke-width="${Math.max(1, strokeWidth * 0.8)}"/>`,
-        ...lines.map((line, index) => [
-          `<text x="${center.x}" y="${g.height * (index === 0 ? 0.42 : 0.74)}"`,
+        hasDate ? `<line x1="${g.width * 0.18}" y1="${dividerY}" x2="${g.width * 0.82}" y2="${dividerY}" stroke="${color}" stroke-width="${Math.max(1, strokeWidth * 0.8)}"/>` : '',
+        `<text x="${center.x}" y="${line1Y}"`,
+        ` fill="${color}"`,
+        ` font-size="${fontSize}"`,
+        ' font-family="Microsoft JhengHei, PingFang TC, system-ui, sans-serif"',
+        ' font-weight="600"',
+        ' text-anchor="middle"',
+        ' dominant-baseline="middle"',
+        ` xml:space="preserve">${this.#escapeSvgText(lines[0])}</text>`,
+        hasDate ? [
+          `<text x="${center.x}" y="${line2Y}"`,
           ` fill="${color}"`,
-          ` font-size="${fontSize}"`,
-          ' font-family="Microsoft JhengHei, PingFang TC, sans-serif"',
-          ' font-weight="600"',
+          ` font-size="${Math.max(8, fontSize * 0.72)}"`,
+          ' font-family="Microsoft JhengHei, PingFang TC, system-ui, sans-serif"',
           ' text-anchor="middle"',
-          ' xml:space="preserve"',
-          `>${this.#escapeSvgText(line)}</text>`,
-        ].join('')),
+          ' dominant-baseline="middle"',
+          ` xml:space="preserve">${this.#escapeSvgText(lines[1])}</text>`,
+        ].join('') : '',
         '</g>',
         '</g>',
         '</svg>',

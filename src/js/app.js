@@ -657,39 +657,62 @@ async function openDeleteConfirmDialog(pageNumber) {
   return Boolean(result !== null);
 }
 
-async function openSplitDialog(pageCount) {
+async function openSplitDialog(pageCount, defaultBaseName = 'document') {
   return showWorkflowDialog({
     title: '拆分 PDF',
-    description: '直接輸入頁面範圍即可，例如 1-3, 4-7, 8-12。',
+    description: '輸入頁面範圍，設定檔名前綴與輸出方式。',
     submitLabel: '開始拆分',
     buildContent(body) {
       const layout = el('div', 'workflow-grid');
       const left = el('section', 'workflow-panel');
       const right = el('section', 'workflow-panel workflow-preview-shell');
+
+      // Range input
       const intent = document.createElement('textarea');
       intent.className = 'form-input inspector-textarea';
-      intent.rows = 5;
-      intent.placeholder = '例如 1-3, 4-7, 8-12';
+      intent.rows = 4;
+      intent.placeholder = `例如 1-3, 4-7, 8-${pageCount}（留空 = 每頁一份）`;
+
+      // File name prefix
+      const prefixInput = document.createElement('input');
+      prefixInput.type = 'text';
+      prefixInput.className = 'form-input';
+      prefixInput.placeholder = '檔名前綴';
+      prefixInput.value = defaultBaseName;
+
+      // Output mode: zip vs individual
+      const outputModeSelect = buildSelect([
+        ['individual', '個別下載（每份各自下載）'],
+        ['zip', '打包 ZIP 下載'],
+      ], 'individual');
+
       const summary = el('div', 'workflow-preview-summary');
       const chips = el('div', 'workflow-chip-row');
       const details = el('div', 'workflow-help');
 
       const update = () => {
-        const ranges = parseSplitRanges(intent.value, pageCount);
+        const ranges = intent.value.trim()
+          ? parseSplitRanges(intent.value, pageCount)
+          : Array.from({ length: pageCount }, (_, i) => ({ from: i + 1, to: i + 1 }));
         chips.innerHTML = '';
         if (ranges.length === 0) {
           details.textContent = '目前還沒有辨識到可用的頁面範圍。';
           return;
         }
-        details.textContent = `將輸出 ${ranges.length} 份 PDF。`;
-        ranges.slice(0, 8).forEach((range) => {
-          const chip = el('span', 'workflow-chip', range.from === range.to ? `第 ${range.from} 頁` : `${range.from}-${range.to}`);
-          chips.appendChild(chip);
+        const prefix = prefixInput.value.trim() || defaultBaseName;
+        details.textContent = `將輸出 ${ranges.length} 份 PDF（${outputModeSelect.value === 'zip' ? '打包 ZIP' : '個別下載'}）`;
+        ranges.slice(0, 8).forEach((range, i) => {
+          const name = ranges.length === 1 ? `${prefix}.pdf` : `${prefix}_part${String(i + 1).padStart(2, '0')}.pdf`;
+          chips.appendChild(el('span', 'workflow-chip', range.from === range.to ? `p${range.from}` : `p${range.from}-${range.to}`));
+          chips.lastElementChild.title = name;
         });
       };
 
       left.appendChild(el('div', 'workflow-section-title', '拆分設定'));
-      left.appendChild(buildFormGroup('頁面範圍', intent, '支援單頁與區間，使用逗號分隔。'));
+      left.appendChild(buildFormGroup('頁面範圍', intent, '留空表示每頁單獨輸出。支援「1-3, 4-7, 8-」格式。'));
+      left.appendChild(buildFormGroup('檔名前綴', prefixInput, '輸出檔名格式：前綴_part01.pdf'));
+      left.appendChild(buildFormGroup('輸出方式', outputModeSelect));
+
       right.appendChild(el('div', 'workflow-section-title', '輸出預覽'));
       summary.appendChild(details);
       summary.appendChild(chips);
@@ -699,15 +722,25 @@ async function openSplitDialog(pageCount) {
       body.appendChild(layout);
 
       intent.addEventListener('input', update);
+      prefixInput.addEventListener('input', update);
+      outputModeSelect.addEventListener('change', update);
       update();
 
       return {
         focus() { intent.focus(); },
         getValue() {
-          return parseSplitRanges(intent.value, pageCount);
+          const ranges = intent.value.trim()
+            ? parseSplitRanges(intent.value, pageCount)
+            : Array.from({ length: pageCount }, (_, i) => ({ from: i + 1, to: i + 1 }));
+          return {
+            ranges,
+            prefix: prefixInput.value.trim() || defaultBaseName,
+            outputMode: outputModeSelect.value,
+          };
         },
         validate(value) {
-          return value.length === 0 ? '請描述要拆分的頁面範圍。' : '';
+          if (!value.ranges || value.ranges.length === 0) return '請描述要拆分的頁面範圍。';
+          return '';
         },
       };
     },
@@ -2160,6 +2193,25 @@ async function openSignatureDialog() {
       left.appendChild(buildFormGroup('簽署事由', sigReasonInput));
       left.appendChild(buildFormGroup('簽署地點', sigLocationInput));
 
+      // ---- PDF page thumbnail in right panel ----
+      const pageThumbWrap = el('div', 'workflow-preview-page-wrap');
+      const pageThumbCanvas = document.createElement('canvas');
+      pageThumbCanvas.className = 'workflow-preview-page-canvas';
+      pageThumbWrap.appendChild(pageThumbCanvas);
+      documentEngine.getPage(stateManager.state.currentPage).then((pdfPage) => {
+        const naturalVp = pdfPage.getViewport({ scale: 1 });
+        const thumbScale = 220 / naturalVp.width;
+        const vp = pdfPage.getViewport({ scale: thumbScale });
+        pageThumbCanvas.width = Math.round(vp.width);
+        pageThumbCanvas.height = Math.round(vp.height);
+        pageThumbCanvas.style.width = `${Math.round(vp.width)}px`;
+        pageThumbCanvas.style.height = `${Math.round(vp.height)}px`;
+        const ctx = pageThumbCanvas.getContext('2d');
+        pdfPage.render({ canvasContext: ctx, viewport: vp });
+      }).catch(() => { /* no document open or render failed */ });
+
+      right.appendChild(el('div', 'workflow-section-title', '目前頁面'));
+      right.appendChild(pageThumbWrap);
       right.appendChild(el('div', 'workflow-section-title', '簽名預覽'));
       right.appendChild(preview);
       right.appendChild(el('p', 'workflow-help', '確認後切換到簽署工具，回到頁面拖曳放置範圍。'));
@@ -2689,7 +2741,7 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
     description: `已選取 ${selectedPages.length} 頁（${selectedPages.slice(0, 5).join('、')}${selectedPages.length > 5 ? '…' : ''}）。請指定插入位置。`,
     submitLabel: '移動',
     buildContent(body) {
-      const row = el('div', 'workflow-grid');
+      const panel = el('section', 'workflow-panel');
 
       const targetInput = document.createElement('input');
       targetInput.type = 'number';
@@ -2700,12 +2752,12 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
       targetInput.value = '';
 
       const hint = el('p', 'workflow-help',
-        `輸入 0 表示移到第 1 頁之前，輸入 ${pageCount} 表示移到最後一頁之後。`
+        `輸入 0 表示移到第 1 頁之前，輸入 ${pageCount} 表示移到最後一頁之後。選取的頁碼：${selectedPages.join('、')}`
       );
 
-      row.appendChild(buildFormGroup('插入到第 N 頁之後（0 = 文件開頭）', targetInput));
-      body.appendChild(row);
-      body.appendChild(hint);
+      panel.appendChild(buildFormGroup('插入到第 N 頁之後（0 = 文件開頭）', targetInput));
+      panel.appendChild(hint);
+      body.appendChild(panel);
 
       return {
         focus() { targetInput.focus(); targetInput.select(); },
@@ -2913,7 +2965,7 @@ function resolveThumbnailSelection(pageNumber, state, modifiers = {}) {
 }
 
 // ---- UI Action Router ----
-async function handleAction({ action, value, page, files, source, fromPage, toPage, patch }) {
+async function handleAction({ action, value, page, files, source, fromPage, fromPages, toPage, patch }) {
   const state = stateManager.state;
 
   switch (action) {
@@ -3266,8 +3318,8 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
       break;
 
     case 'batch-move-pages': {
-      const pages = Array.isArray(value?.fromPages) ? value.fromPages
-        : Array.isArray(fromPages) ? fromPages
+      const pages = Array.isArray(fromPages) ? fromPages
+        : Array.isArray(value?.fromPages) ? value.fromPages
         : (stateManager.state.selectedPageNumbers ?? []);
       if (pages.length === 0) break;
 
@@ -3371,27 +3423,38 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
 
     case 'split': {
       if (stateManager.state.documentStatus !== 'ready') break;
-      const pageCount = stateManager.state.pageCount;
-      const ranges = await openSplitDialog(state.pageCount);
-      if (!ranges) break;
+      const baseName = (documentEngine.fileName ?? 'document').replace(/\.pdf$/i, '');
+      const splitOpts = await openSplitDialog(stateManager.state.pageCount, baseName);
+      if (!splitOpts) break;
+      const { ranges: splitRanges, prefix: splitPrefix, outputMode: splitOutputMode } = splitOpts;
       appRenderer.toast('正在拆分 PDF…', 'info', 10000);
-      documentEngine.splitToRanges(ranges).then(async results => {
+      documentEngine.splitToRanges(splitRanges).then(async results => {
         if (results.length === 0) { appRenderer.toast('沒有可輸出的拆分結果', 'error'); return; }
-        if (results.length === 1) {
-          const blob = new Blob([results[0].bytes], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = results[0].name; a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 60000);
-        } else {
+        // Apply user-specified prefix to filenames
+        const named = results.map((r, i) => ({
+          bytes: r.bytes,
+          name: results.length === 1
+            ? `${splitPrefix}.pdf`
+            : `${splitPrefix}_part${String(i + 1).padStart(2, '0')}.pdf`,
+        }));
+        const useZip = splitOutputMode === 'zip' || named.length > 5;
+        if (useZip) {
           const zipFiles = {};
-          for (const r of results) zipFiles[r.name] = r.bytes;
+          for (const r of named) zipFiles[r.name] = r.bytes;
           const zipped = window.fflate.zipSync(zipFiles, { level: 0 });
           const blob = new Blob([zipped], { type: 'application/zip' });
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = 'split.zip'; a.click();
+          const a = document.createElement('a'); a.href = url; a.download = `${splitPrefix}_split.zip`; a.click();
           setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } else {
+          for (const r of named) {
+            const blob = new Blob([r.bytes], { type: 'application/pdf' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = r.name; a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          }
         }
-        appRenderer.toast(`已輸出 ${results.length} 份 PDF`, 'success');
+        appRenderer.toast(`已輸出 ${named.length} 份 PDF`, 'success');
       }).catch(err => appRenderer.toast(`拆分失敗：${err.message}`, 'error'));
       break;
     }

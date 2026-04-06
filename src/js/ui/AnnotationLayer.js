@@ -1434,9 +1434,10 @@ export class AnnotationLayer {
   }
 
   #applyPatch(target, patch) {
+    const originalStyle = target.style ? { ...target.style } : {};
     Object.assign(target, patch);
     if (patch.style) {
-      target.style = { ...target.style, ...patch.style };
+      target.style = { ...originalStyle, ...patch.style };
     }
     if (patch.signatureData) {
       target.signatureData = { ...target.signatureData, ...patch.signatureData };
