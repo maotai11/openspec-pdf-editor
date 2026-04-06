@@ -66,6 +66,24 @@ let signaturePresetDraft = buildTypedSignaturePreset({
 // Signature manifest: records every signature placed in this session
 // [{ signerName, title, reason, location, signedAt, pageNumber }]
 let signatureManifest = [];
+// Pending signature info: filled when dialog confirmed, consumed on annotation:add
+let pendingSignatureInfo = null;
+
+// Stamp preset draft
+let stampPresetDraft = { text: '核准', color: '#C00000', includeDate: true };
+
+const STAMP_PRESET_TYPES = [
+  ['核准', '核准'],
+  ['批准', '批准'],
+  ['已收到', '已收到'],
+  ['已審閱', '已審閱'],
+  ['草稿', '草稿'],
+  ['機密', '機密'],
+  ['APPROVED', 'APPROVED'],
+  ['RECEIVED', 'RECEIVED'],
+  ['DRAFT', 'DRAFT'],
+  ['custom', '自訂文字…'],
+];
 const PAGE_NUMBER_POSITIONS = [
   ['bottom-left', '下方靠左'],
   ['bottom-center', '下方置中'],
@@ -1779,6 +1797,140 @@ async function exportCurrentDocumentToOffice(state) {
   }
 }
 
+async function openStampDialog() {
+  return showWorkflowDialog({
+    title: '設定印章',
+    description: '選擇預設印章類型或輸入自訂文字，確認後切換到印章工具拖曳放置範圍。',
+    submitLabel: '使用這個印章',
+    buildContent(body) {
+      const layout = el('div', 'workflow-grid');
+      const left = el('section', 'workflow-panel');
+      const right = el('section', 'workflow-panel workflow-preview-shell');
+
+      // Preset type selector
+      const typeSelect = buildSelect(
+        STAMP_PRESET_TYPES,
+        STAMP_PRESET_TYPES.find(([v]) => v === stampPresetDraft?.text) ? stampPresetDraft.text : 'custom',
+      );
+
+      // Custom text input
+      const customInput = document.createElement('input');
+      customInput.type = 'text';
+      customInput.className = 'form-input';
+      customInput.placeholder = '印章文字（最多顯示兩行）';
+      customInput.value = stampPresetDraft?.text ?? '核准';
+
+      // Color selector
+      const colorSelect = buildSelect([
+        ['#C00000', '紅色（傳統印章）'],
+        ['#1D4ED8', '藍色'],
+        ['#15803D', '綠色'],
+        ['#000000', '黑色'],
+      ], stampPresetDraft?.color ?? '#C00000');
+
+      const { wrapper: includeDateWrapper, input: includeDateInput } = buildCheckbox(
+        '附帶蓋印日期', stampPresetDraft?.includeDate ?? true
+      );
+
+      // Preview stamp SVG
+      const previewSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      previewSvg.setAttribute('viewBox', '0 0 200 90');
+      previewSvg.setAttribute('width', '200');
+      previewSvg.setAttribute('height', '90');
+
+      const buildStampPreview = () => {
+        const isCustom = typeSelect.value === 'custom';
+        const text = isCustom ? (customInput.value.trim() || '印章') : typeSelect.value;
+        const color = colorSelect.value;
+        const dateStr = new Intl.DateTimeFormat('zh-TW', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(new Date()).replaceAll('/', '.');
+        const line2 = includeDateInput.checked ? dateStr : '';
+        previewSvg.innerHTML = '';
+        const ellipse = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+        ellipse.setAttribute('cx', '100'); ellipse.setAttribute('cy', '45');
+        ellipse.setAttribute('rx', '95'); ellipse.setAttribute('ry', '40');
+        ellipse.setAttribute('fill', 'none');
+        ellipse.setAttribute('stroke', color); ellipse.setAttribute('stroke-width', '2.5');
+        previewSvg.appendChild(ellipse);
+        if (line2) {
+          const divider = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          divider.setAttribute('x1', '20'); divider.setAttribute('x2', '180');
+          divider.setAttribute('y1', '54'); divider.setAttribute('y2', '54');
+          divider.setAttribute('stroke', color); divider.setAttribute('stroke-width', '1.5');
+          previewSvg.appendChild(divider);
+          const t1 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t1.setAttribute('x', '100'); t1.setAttribute('y', '44');
+          t1.setAttribute('text-anchor', 'middle');
+          t1.setAttribute('font-family', 'system-ui, sans-serif');
+          t1.setAttribute('font-size', '22');
+          t1.setAttribute('fill', color); t1.textContent = text;
+          previewSvg.appendChild(t1);
+          const t2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t2.setAttribute('x', '100'); t2.setAttribute('y', '72');
+          t2.setAttribute('text-anchor', 'middle');
+          t2.setAttribute('font-family', 'system-ui, sans-serif');
+          t2.setAttribute('font-size', '16');
+          t2.setAttribute('fill', color); t2.textContent = line2;
+          previewSvg.appendChild(t2);
+        } else {
+          const t1 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t1.setAttribute('x', '100'); t1.setAttribute('y', '54');
+          t1.setAttribute('text-anchor', 'middle');
+          t1.setAttribute('font-family', 'system-ui, sans-serif');
+          t1.setAttribute('font-size', '26');
+          t1.setAttribute('fill', color); t1.textContent = text;
+          previewSvg.appendChild(t1);
+        }
+      };
+
+      const updateCustomVisibility = () => {
+        const isCustom = typeSelect.value === 'custom';
+        customInput.disabled = !isCustom;
+        customInput.style.display = isCustom ? '' : 'none';
+      };
+
+      typeSelect.addEventListener('change', () => { updateCustomVisibility(); buildStampPreview(); });
+      customInput.addEventListener('input', buildStampPreview);
+      colorSelect.addEventListener('change', buildStampPreview);
+      includeDateInput.addEventListener('change', buildStampPreview);
+
+      left.appendChild(el('div', 'workflow-section-title', '印章設定'));
+      left.appendChild(buildFormGroup('印章類型', typeSelect));
+      left.appendChild(buildFormGroup('自訂文字', customInput));
+      left.appendChild(buildFormGroup('顏色', colorSelect));
+      left.appendChild(includeDateWrapper);
+
+      right.appendChild(el('div', 'workflow-section-title', '印章預覽'));
+      right.appendChild(previewSvg);
+      right.appendChild(el('p', 'workflow-help', '確認後切換到印章工具，在頁面上拖曳放置印章範圍。'));
+
+      layout.appendChild(left);
+      layout.appendChild(right);
+      body.appendChild(layout);
+
+      updateCustomVisibility();
+      buildStampPreview();
+
+      return {
+        focus() { typeSelect.focus(); },
+        getValue() {
+          const isCustom = typeSelect.value === 'custom';
+          return {
+            text: isCustom ? (customInput.value.trim() || '印章') : typeSelect.value,
+            color: colorSelect.value,
+            includeDate: includeDateInput.checked,
+          };
+        },
+        validate(value) {
+          if (!String(value.text ?? '').trim()) return '請輸入印章文字。';
+          return '';
+        },
+      };
+    },
+  });
+}
+
 async function openSignatureDialog() {
   const preview = document.createElement('div');
   preview.className = 'workflow-preview-signature';
@@ -2939,8 +3091,7 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
     case 'tool-rect':
     case 'tool-circle':
     case 'tool-line':
-    case 'tool-arrow':
-    case 'tool-stamp': {
+    case 'tool-arrow': {
       const toolName = action.replace('tool-', '');
       stateManager.patch({ selectedTool: toolName });
       document.getElementById('annotation-layer-root')
@@ -2948,13 +3099,28 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
         ?.style.setProperty('cursor', toolName === 'select' ? 'default' : 'crosshair');
       break;
     }
+    case 'tool-stamp': {
+      const preset = await openStampDialog();
+      if (!preset) break;
+      stampPresetDraft = { ...preset };
+      annotationLayer.setStampPreset(preset);
+      stateManager.patch({ selectedTool: 'stamp' });
+      document.getElementById('annotation-layer-root')
+        .querySelector('svg')
+        ?.style.setProperty('cursor', 'crosshair');
+      appRenderer.toast(
+        `已切換到印章工具（${preset.text}）。請在頁面上拖曳放置印章範圍。`,
+        'success'
+      );
+      break;
+    }
     case 'tool-signature': {
       const preset = await openSignatureDialog();
       if (!preset) break;
       signaturePresetDraft = structuredClone(preset);
       annotationLayer.setSignaturePreset(preset);
-      // Record into signature manifest
-      const manifestEntry = {
+      // Store pending info; manifest entry is committed on annotation:add (captures actual page)
+      pendingSignatureInfo = {
         signerName: preset.signerName ?? '簽署者',
         title:      preset.sigTitle ?? '',
         reason:     preset.sigReason ?? '',
@@ -2963,20 +3129,14 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
           year: 'numeric', month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit',
         }).format(new Date()).replaceAll('/', '.'),
-        pageNumber: state.currentPage,
       };
-      signatureManifest.push(manifestEntry);
-      // Embed metadata into PDF (non-blocking, best-effort)
-      try { documentEngine.embedSignatureMetadata(signatureManifest); } catch { /* non-critical */ }
-      // Update status bar to show signed indicator
-      renderSignedStatusBadge();
 
       stateManager.patch({ selectedTool: 'signature', toolHubTab: 'esign' });
       document.getElementById('annotation-layer-root')
         .querySelector('svg')
         ?.style.setProperty('cursor', 'crosshair');
       appRenderer.toast(
-        `已切換到電子簽署工具（${manifestEntry.signerName}，共 ${signatureManifest.length} 筆記錄）。請回到頁面拖曳放置範圍。`,
+        `已切換到電子簽署工具（${pendingSignatureInfo.signerName}）。請回到頁面拖曳放置範圍。`,
         'success'
       );
       break;
@@ -3159,6 +3319,28 @@ async function handleAction({ action, value, page, files, source, fromPage, toPa
         flattenAnnotations: true,
       });
       break;
+
+    case 'sign-and-save': {
+      // Offline signing complete flow: flatten all annotations (including signatures/stamps) + optionally protect
+      const hasSigs = signatureManifest.length > 0;
+      const sigSummary = hasSigs
+        ? `（已有 ${signatureManifest.length} 筆簽署記錄）`
+        : '（尚無簽署記錄，建議先使用電子簽署工具）';
+      appRenderer.toast(`開啟離線簽署儲存流程 ${sigSummary}`, 'info', 3000);
+      await saveAs({
+        flattenAnnotations: true,
+        enableProtection: false,
+        editMetadata: hasSigs,
+        metadata: hasSigs ? {
+          author: signatureManifest.map(m => m.signerName).join(', '),
+          subject: signatureManifest.map(m =>
+            `[簽署] ${m.signerName}${m.reason ? '/' + m.reason : ''} p.${m.pageNumber}`
+          ).join(' | '),
+          keywords: ['電子簽署', 'OpenSpec', ...signatureManifest.map(m => m.signerName)],
+        } : {},
+      });
+      break;
+    }
 
     case 'merge': {
       const input = document.createElement('input');
@@ -3378,6 +3560,17 @@ annotationLayer.init(canvasLayer, documentEngine);
     });
     clearTimeout(saveStatusTimer);
     saveStatusTimer = setTimeout(() => appRenderer.setSaveStatus('saved'), SAVE_STATUS_DISPLAY_MS);
+  });
+
+  // When a signature annotation is actually placed, commit the pending manifest entry
+  eventBus.on('annotation:added', ({ type, pageNumber }) => {
+    if (type === 'signature' && pendingSignatureInfo) {
+      const entry = { ...pendingSignatureInfo, pageNumber };
+      signatureManifest.push(entry);
+      pendingSignatureInfo = null;
+      try { documentEngine.embedSignatureMetadata(signatureManifest); } catch { /* non-critical */ }
+      renderSignedStatusBadge();
+    }
   });
 
   // CommandStack changes ??update menu disabled states

@@ -67,6 +67,11 @@ export class AnnotationLayer {
       day: '2-digit',
     }).format(new Date()).replaceAll('/', '.'),
   });
+  #stampPreset = {
+    text: '核准',
+    color: '#C00000',
+    includeDate: true,
+  };
 
   init(canvasLayer, documentEngine) {
     this.#canvasLayer = canvasLayer;
@@ -150,6 +155,11 @@ export class AnnotationLayer {
   setSignaturePreset(signaturePreset) {
     if (!signaturePreset) return;
     this.#signaturePreset = structuredClone(signaturePreset);
+  }
+
+  setStampPreset(stampPreset) {
+    if (!stampPreset) return;
+    this.#stampPreset = structuredClone(stampPreset);
   }
 
   selectAllOnCurrentPage() {
@@ -803,17 +813,21 @@ export class AnnotationLayer {
           content: '文字標註',
         };
       }
-      case 'stamp':
+      case 'stamp': {
+        const preset = this.#stampPreset;
+        const dateStr = new Intl.DateTimeFormat('zh-TW', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(new Date()).replaceAll('/', '.');
+        const stampContent = preset.includeDate
+          ? `${preset.text ?? '核准'}\n${dateStr}`
+          : (preset.text ?? '核准');
         return {
           ...base,
           geometry: rectGeometry,
-          style: { color: '#C00000', opacity: 1, strokeWidth: 1.5, rotation: 0, fontSize: 12 },
-          content: `電子印章\n${new Intl.DateTimeFormat('zh-TW', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          }).format(new Date()).replaceAll('/', '.')}`,
+          style: { color: preset.color ?? '#C00000', opacity: 1, strokeWidth: 1.5, rotation: 0, fontSize: 12 },
+          content: stampContent,
         };
+      }
       case 'signature': {
         const preset = structuredClone(this.#signaturePreset ?? buildTypedSignaturePreset({
           signerName: '簽署者',
@@ -843,6 +857,7 @@ export class AnnotationLayer {
     if (annotation.pageNumber === this.#currentPage) {
       this.#redraw();
     }
+    eventBus.emit('annotation:added', { type: annotation.type, pageNumber: annotation.pageNumber });
   }
 
   #removeAnnotation(id, pageNumber) {
