@@ -170,6 +170,28 @@ export class AnnotationLayer {
     this.#emitSelectionChanged();
   }
 
+  /**
+   * 批量放置標注（印章/電子簽署多頁模式）。
+   * annotations 陣列中每個物件需含 id、type、pageNumber、geometry 等欄位。
+   */
+  placeBatchAnnotations(annotations) {
+    if (!annotations?.length) return;
+    const cmd = {
+      execute: () => {
+        for (const ann of annotations) this.#addAnnotation(ann);
+        this.#redraw();
+      },
+      undo: () => {
+        for (const ann of annotations) this.#removeAnnotation(ann.id, ann.pageNumber);
+        this.#redraw();
+      },
+      description: `批量放置 ${annotations.length} 個標注`,
+      estimatedBytes: JSON.stringify(annotations).length * 2,
+    };
+    commandStack.execute(cmd);
+    eventBus.emit('annotations:changed');
+  }
+
   deleteSelected() {
     if (this.#selectedIds.size === 0) return;
     const snapshots = [...this.#selectedIds]
@@ -343,7 +365,14 @@ export class AnnotationLayer {
 
     let annotations = [];
     if (tool === 'highlight' || tool === 'underline') {
+      // 記錄 await 前的頁面和工具狀態
+      const currentPageBefore = this.#currentPage;
+      const toolBefore = tool;
       annotations = await this.#buildTextMarkupAnnotations(tool, end);
+      // await 後驗證：用戶可能已經切換頁面或工具
+      if (this.#currentPage !== currentPageBefore || stateManager.state.selectedTool !== toolBefore) {
+        return; // 狀態已變化，放棄此操作
+      }
     }
     if (annotations.length === 0) {
       const annotation = this.#buildAnnotation(tool, end);
@@ -756,16 +785,16 @@ export class AnnotationLayer {
           style: { color: '#FFF200', opacity: 0.4 },
         };
       case 'underline': {
-        const underlineY = rectGeometry.y + Math.max(0.75, rectGeometry.height * 0.12);
+        // Use actual start/end points (like line tool) so underline can go in any direction
+        const ulStart = this.#screenPointToPdf(this.#drawStart);
+        const ulEnd = this.#screenPointToPdf(endPt);
+        const ulDx = ulEnd.x - ulStart.x;
+        const ulDy = ulEnd.y - ulStart.y;
+        const ulLen = Math.sqrt(ulDx * ulDx + ulDy * ulDy);
         return {
           ...base,
-          geometry: {
-            x1: rectGeometry.x,
-            y1: underlineY,
-            x2: rectGeometry.x + rectGeometry.width,
-            y2: underlineY,
-          },
-          style: { color: '#C00000', opacity: 1, strokeWidth: Math.max(1, rectGeometry.height * 0.08 || 1.25) },
+          geometry: { x1: ulStart.x, y1: ulStart.y, x2: ulEnd.x, y2: ulEnd.y },
+          style: { color: '#C00000', opacity: 1, strokeWidth: Math.max(1, ulLen * 0.012 || 1.25) },
         };
       }
       case 'rect':

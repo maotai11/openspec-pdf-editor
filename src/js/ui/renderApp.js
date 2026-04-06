@@ -310,9 +310,10 @@ export class AppRenderer {
         {
           title: '電子簽署',
           items: [
-            { label: '新增印章', enabled: false, note: '下一批補印章流程' },
-            { label: '填寫和簽署', enabled: false, note: '離線簽署 UI 尚未完成' },
-            { label: '保護 PDF', enabled: false, note: '目前離線版未提供加密' },
+            { label: '蓋印章', action: 'tool-stamp', enabled: hasDoc },
+            { label: '電子簽署', action: 'tool-signature', enabled: hasDoc },
+            { label: '簽署記錄', action: 'show-signature-manifest', enabled: hasDoc },
+            { label: '保護 PDF', enabled: false, note: '離線版尚未提供加密' },
           ],
         },
       ],

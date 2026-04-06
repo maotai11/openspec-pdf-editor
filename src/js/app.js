@@ -31,7 +31,7 @@ import {
 import { resolveImageWatermarkLayout, resolvePageNumberLayout, resolveWatermarkLayout } from './core/LayoutPresets.js';
 import { embedImageFile, isImageLikeFile, readImageDimensions } from './core/ImageAsset.js';
 import { resolveImageDrawLayout, resolveMarginPt, resolveTargetPageSize } from './core/ImagePdfLayout.js';
-import { getDisplayPageSize, normalizeRotation } from './core/PageGeometry.js';
+import { getDisplayPageSize, normalizeRotation, screenRectToPdfRect } from './core/PageGeometry.js';
 import { exportPdfToDocx, exportPdfToPptx, exportPdfToXlsx } from './core/OfficeExport.js';
 import { protectPdfBytes } from './core/PdfProtection.js';
 import { buildTypedSignaturePreset } from './core/SignatureAsset.js';
@@ -269,10 +269,44 @@ async function renderWorkflowPreviewSurface(node, metrics, pageNumber = stateMan
   return surface;
 }
 
+/**
+ * 點擊預覽放大 lightbox。傳入一個 canvas 或 img 元素，點擊後全螢幕展示。
+ */
+function attachPreviewZoom(node) {
+  node.style.cursor = 'zoom-in';
+  node.title = '點擊放大預覽';
+  node.addEventListener('click', () => {
+    const overlay = document.createElement('div');
+    overlay.className = 'preview-zoom-overlay';
+    const img = document.createElement('img');
+    img.className = 'preview-zoom-img';
+    // 如果 node 是 canvas 直接轉 dataURL，否則取 src
+    if (node.tagName === 'CANVAS') {
+      img.src = node.toDataURL('image/png');
+    } else if (node.querySelector('img.workflow-preview-surface')) {
+      img.src = node.querySelector('img.workflow-preview-surface').src;
+    } else if (node.src) {
+      img.src = node.src;
+    } else {
+      return;
+    }
+    const closeBtn = el('button', 'preview-zoom-close', '✕');
+    closeBtn.addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
+    });
+    overlay.appendChild(img);
+    overlay.appendChild(closeBtn);
+    document.body.appendChild(overlay);
+  });
+}
+
 async function createWorkflowPreviewPage(metrics, pageNumber = stateManager.state.currentPage) {
   const node = el('div', 'workflow-preview-page');
   applyWorkflowPreviewAspect(node, metrics);
   await renderWorkflowPreviewSurface(node, metrics, pageNumber);
+  attachPreviewZoom(node);
   return node;
 }
 
@@ -1831,10 +1865,11 @@ async function exportCurrentDocumentToOffice(state) {
 }
 
 async function openStampDialog() {
+  const { pageCount, currentPage } = stateManager.state;
   return showWorkflowDialog({
     title: '設定印章',
-    description: '選擇預設印章類型或輸入自訂文字，確認後切換到印章工具拖曳放置範圍。',
-    submitLabel: '使用這個印章',
+    description: '設定印章樣式與套用範圍。選擇「批量蓋章」時自動放置於各頁中央，也可選「單頁互動」後手動拖曳。',
+    submitLabel: '確認',
     buildContent(body) {
       const layout = el('div', 'workflow-grid');
       const left = el('section', 'workflow-panel');
@@ -1934,9 +1969,36 @@ async function openStampDialog() {
       left.appendChild(buildFormGroup('顏色', colorSelect));
       left.appendChild(includeDateWrapper);
 
+      // ---- 套用範圍（批量蓋章） ----
+      left.appendChild(el('div', 'workflow-section-title', '套用範圍'));
+      const stampScope = buildPageScopeControls(pageCount, currentPage, {
+        mode: 'current', fromPage: currentPage, toPage: currentPage,
+      });
+      const stampPositionSelect = buildSelect([
+        ['center', '頁面中央'],
+        ['bottom-right', '右下角'],
+        ['bottom-left', '左下角'],
+        ['top-right', '右上角'],
+        ['top-left', '左上角'],
+      ], 'center');
+      left.appendChild(buildFormGroup('套用頁面', stampScope.scopeSelect));
+      left.appendChild(stampScope.rangeRow);
+      left.appendChild(stampScope.pagesRow);
+      left.appendChild(stampScope.summary);
+      left.appendChild(buildFormGroup('放置位置（批量模式）', stampPositionSelect));
+
+      // 印章大小控制
+      const sizeSelect = buildSelect([
+        ['small', '小（頁面 15%）'],
+        ['medium', '中（頁面 25%，預設）'],
+        ['large', '大（頁面 35%）'],
+        ['xlarge', '特大（頁面 50%）'],
+      ], 'medium');
+      left.appendChild(buildFormGroup('印章大小', sizeSelect));
+
       right.appendChild(el('div', 'workflow-section-title', '印章預覽'));
       right.appendChild(previewSvg);
-      right.appendChild(el('p', 'workflow-help', '確認後切換到印章工具，在頁面上拖曳放置印章範圍。'));
+      right.appendChild(el('p', 'workflow-help', '只有目前頁 → 確認後手動拖曳。多頁批量 → 自動依指定位置放置。'));
 
       layout.appendChild(left);
       layout.appendChild(right);
@@ -1949,10 +2011,15 @@ async function openStampDialog() {
         focus() { typeSelect.focus(); },
         getValue() {
           const isCustom = typeSelect.value === 'custom';
+          const scope = stampScope.read();
           return {
             text: isCustom ? (customInput.value.trim() || '印章') : typeSelect.value,
             color: colorSelect.value,
             includeDate: includeDateInput.checked,
+            batchPages: scope.pages,
+            batchPosition: stampPositionSelect.value,
+            batchSize: sizeSelect.value,
+            batchMode: scope.pages.length > 1,
           };
         },
         validate(value) {
@@ -1965,6 +2032,7 @@ async function openStampDialog() {
 }
 
 async function openSignatureDialog() {
+  const { pageCount, currentPage } = stateManager.state;
   const preview = document.createElement('div');
   preview.className = 'workflow-preview-signature';
 
@@ -2011,9 +2079,10 @@ async function openSignatureDialog() {
       const { wrapper: includeDateWrapper, input: includeDateInput } = buildCheckbox('附帶日期', signaturePresetDraft?.includeDate ?? true);
 
       const drawCanvas = document.createElement('canvas');
-      drawCanvas.width = 520;
-      drawCanvas.height = 180;
+      drawCanvas.width = 480;
+      drawCanvas.height = 160;
       drawCanvas.className = 'signature-pad';
+      drawCanvas.style.maxWidth = '100%';
       const drawContext = drawCanvas.getContext('2d');
       drawContext.lineCap = 'round';
       drawContext.lineJoin = 'round';
@@ -2097,13 +2166,43 @@ async function openSignatureDialog() {
       modeGroups.typed.appendChild(includeDateWrapper);
       modeGroups.typed.appendChild(buildFormGroup('日期文字', dateInput));
 
+      // 去背景選項（手寫與圖片模式）
+      const { wrapper: removeBgWrapper, input: removeBgInput } = buildCheckbox('去除白色背景', true);
+
+      /** 去除 canvas 或 img dataUrl 的白色背景，返回透明 PNG dataUrl */
+      function removeWhiteBg(dataUrl) {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = img.width; c.height = img.height;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, c.width, c.height);
+            const data = imageData.data;
+            const threshold = 230;
+            for (let i = 0; i < data.length; i += 4) {
+              if (data[i] >= threshold && data[i + 1] >= threshold && data[i + 2] >= threshold) {
+                data[i + 3] = 0; // 設為透明
+              }
+            }
+            ctx.putImageData(imageData, 0, 0);
+            resolve(c.toDataURL('image/png'));
+          };
+          img.src = dataUrl;
+        });
+      }
+
       modeGroups.drawn.appendChild(el('div', 'workflow-help', '直接在下方簽名板手寫。輸出時會保留目前外觀。'));
       modeGroups.drawn.appendChild(drawCanvas);
       modeGroups.drawn.appendChild(clearDrawButton);
+      modeGroups.drawn.appendChild(removeBgWrapper);
 
       modeGroups.image.appendChild(imageButton);
       modeGroups.image.appendChild(imageInput);
-      modeGroups.image.appendChild(el('p', 'workflow-help', '建議使用透明背景 PNG；JPG / WebP 也可。'));
+      const { wrapper: removeBgImageWrapper, input: removeBgImageInput } = buildCheckbox('去除白色背景', true);
+      modeGroups.image.appendChild(removeBgImageWrapper);
+      modeGroups.image.appendChild(el('p', 'workflow-help', '建議使用透明背景 PNG；JPG / WebP 也可。去背景可移除白底。'));
 
       const updateMode = () => {
         Object.entries(modeGroups).forEach(([mode, node]) => {
@@ -2193,45 +2292,125 @@ async function openSignatureDialog() {
       left.appendChild(buildFormGroup('簽署事由', sigReasonInput));
       left.appendChild(buildFormGroup('簽署地點', sigLocationInput));
 
-      // ---- PDF page thumbnail in right panel ----
-      const pageThumbWrap = el('div', 'workflow-preview-page-wrap');
+      // 批量簽署頁面選擇
+      left.appendChild(el('div', 'workflow-section-title', '套用範圍'));
+      const sigScope = buildPageScopeControls(pageCount, currentPage, {
+        mode: 'current', fromPage: currentPage, toPage: currentPage,
+      });
+      const sigPositionSelect = buildSelect([
+        ['center', '頁面中央'],
+        ['bottom-right', '右下角'],
+        ['bottom-center', '下方中央'],
+        ['top-right', '右上角'],
+      ], 'bottom-right');
+      left.appendChild(buildFormGroup('套用頁面', sigScope.scopeSelect));
+      left.appendChild(sigScope.rangeRow);
+      left.appendChild(sigScope.pagesRow);
+      left.appendChild(sigScope.summary);
+      left.appendChild(buildFormGroup('放置位置（批量模式）', sigPositionSelect));
+
+      // 簽署大小控制
+      const sigSizeSelect = buildSelect([
+        ['small', '小（頁面 15%）'],
+        ['medium', '中（頁面 25%，預設）'],
+        ['large', '大（頁面 35%）'],
+        ['xlarge', '特大（頁面 50%）'],
+      ], 'medium');
+      left.appendChild(buildFormGroup('簽署大小', sigSizeSelect));
+
+      // ---- 右側：頁面縮圖整合簽名預覽 ----
+      // 用 canvas 渲染頁面，再用 overlay img 疊加簽名
+      const pageThumbWrap = el('div', 'sig-preview-composite');
       const pageThumbCanvas = document.createElement('canvas');
-      pageThumbCanvas.className = 'workflow-preview-page-canvas';
+      pageThumbCanvas.className = 'sig-preview-page-canvas';
+      const sigOverlayImg = document.createElement('img');
+      sigOverlayImg.className = 'sig-preview-overlay';
+      sigOverlayImg.alt = '簽名預覽';
       pageThumbWrap.appendChild(pageThumbCanvas);
+      pageThumbWrap.appendChild(sigOverlayImg);
+      attachPreviewZoom(pageThumbCanvas);
+
+      let thumbScale = 1;
       documentEngine.getPage(stateManager.state.currentPage).then((pdfPage) => {
         const naturalVp = pdfPage.getViewport({ scale: 1 });
-        const thumbScale = 220 / naturalVp.width;
+        thumbScale = 240 / naturalVp.width;
         const vp = pdfPage.getViewport({ scale: thumbScale });
         pageThumbCanvas.width = Math.round(vp.width);
         pageThumbCanvas.height = Math.round(vp.height);
         pageThumbCanvas.style.width = `${Math.round(vp.width)}px`;
         pageThumbCanvas.style.height = `${Math.round(vp.height)}px`;
-        const ctx = pageThumbCanvas.getContext('2d');
-        pdfPage.render({ canvasContext: ctx, viewport: vp });
-      }).catch(() => { /* no document open or render failed */ });
+        pdfPage.render({ canvasContext: pageThumbCanvas.getContext('2d'), viewport: vp });
+      }).catch(() => {});
 
-      right.appendChild(el('div', 'workflow-section-title', '目前頁面'));
+      right.appendChild(el('div', 'workflow-section-title', '頁面 + 簽名整合預覽（點擊可放大）'));
       right.appendChild(pageThumbWrap);
-      right.appendChild(el('div', 'workflow-section-title', '簽名預覽'));
-      right.appendChild(preview);
-      right.appendChild(el('p', 'workflow-help', '確認後切換到簽署工具，回到頁面拖曳放置範圍。'));
       right.appendChild(el('p', 'workflow-help',
-        '簽署資訊（事由、地點、職稱）將記錄至簽署記錄，並在儲存時嵌入 PDF 元數據。'
+        '只有目前頁 → 確認後手動拖曳。多頁批量 → 自動依指定位置放置。'
+      ));
+      right.appendChild(el('p', 'workflow-help',
+        '簽署資訊（事由、地點、職稱）記錄於簽署記錄，儲存時嵌入 PDF 元數據。'
       ));
 
       layout.appendChild(left);
       layout.appendChild(right);
       body.appendChild(layout);
 
-      syncPreview();
+      // 更新 syncPreview：同時更新右側 overlay
+      const origSyncPreview = syncPreview;
+      const enhancedSyncPreview = () => {
+        updateMode();
+        const preset = buildPreset();
+        // 舊版 preview div 不再使用，改用 sigOverlayImg
+        sigOverlayImg.src = preset.dataUrl || '';
+        sigOverlayImg.style.display = preset.dataUrl ? '' : 'none';
+        // 也更新舊 preview 供參考
+        preview.innerHTML = '';
+        if (preset.dataUrl) {
+          const img = document.createElement('img');
+          img.src = preset.dataUrl;
+          img.style.cssText = 'max-width:100%;max-height:120px;object-fit:contain;';
+          preview.appendChild(img);
+        }
+      };
+
+      // 覆蓋所有監聽器
+      modeSelect.removeEventListener('change', syncPreview);
+      signerInput.removeEventListener('input', syncPreview);
+      subtitleInput.removeEventListener('input', syncPreview);
+      includeDateInput.removeEventListener('change', syncPreview);
+      dateInput.removeEventListener('input', syncPreview);
+      drawCanvas.removeEventListener('pointerup', syncPreview);
+
+      modeSelect.addEventListener('change', enhancedSyncPreview);
+      signerInput.addEventListener('input', enhancedSyncPreview);
+      subtitleInput.addEventListener('input', enhancedSyncPreview);
+      includeDateInput.addEventListener('change', enhancedSyncPreview);
+      dateInput.addEventListener('input', enhancedSyncPreview);
+      drawCanvas.addEventListener('pointerup', enhancedSyncPreview);
+      removeBgInput.addEventListener('change', enhancedSyncPreview);
+      removeBgImageInput.addEventListener('change', enhancedSyncPreview);
+
+      enhancedSyncPreview();
 
       return {
         focus() { signerInput.focus(); signerInput.select(); },
-        getValue() {
+        async getValue() {
           const preset = buildPreset();
+          // 去背景處理（手寫/圖片各有獨立 checkbox）
+          const shouldRemoveBg =
+            (modeSelect.value === 'drawn' && removeBgInput.checked) ||
+            (modeSelect.value === 'image' && removeBgImageInput.checked);
+          if (shouldRemoveBg && preset.dataUrl && preset.mode !== 'typed') {
+            preset.dataUrl = await removeWhiteBg(preset.dataUrl);
+          }
           preset.sigTitle    = sigTitleInput.value.trim();
           preset.sigReason   = sigReasonInput.value.trim();
           preset.sigLocation = sigLocationInput.value.trim();
+          const scope = sigScope.read();
+          preset.batchPages    = scope.pages;
+          preset.batchPosition = sigPositionSelect.value;
+          preset.batchSize     = sigSizeSelect.value;
+          preset.batchMode     = scope.pages.length > 1;
           return preset;
         },
         validate(value) {
@@ -2340,13 +2519,24 @@ function downloadBlob(blob, name) {
 async function saveBlobToFile(blob, suggestedName) {
   const normalizedName = normalizePdfFileName(suggestedName);
 
+  // 根據檔名判斷 MIME 類型
+  const ext = normalizedName.split('.').pop()?.toLowerCase();
+  const mimeType = ext === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : ext === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    : ext === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : 'application/pdf';
+  const fileDesc = ext === 'docx' ? 'Word 文件'
+    : ext === 'pptx' ? 'PowerPoint 簡報'
+    : ext === 'xlsx' ? 'Excel 活頁簿'
+    : 'PDF 文件';
+
   if (capabilities.fileSystemAccess) {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: normalizedName,
         types: [{
-          description: 'PDF 文件',
-          accept: { 'application/pdf': ['.pdf'] },
+          description: fileDesc,
+          accept: { [mimeType]: [`.${ext}`] },
         }],
       });
       const writable = await handle.createWritable();
@@ -2669,13 +2859,26 @@ function cloneAnnotations(annotations) {
   return JSON.parse(JSON.stringify(annotations));
 }
 
+let snapshotLock = Promise.resolve();
+
 async function captureEditorSnapshot(currentPage = stateManager.state.currentPage) {
-  return {
-    pdfBytes: await documentEngine.createSnapshotBytes(),
-    annotations: cloneAnnotations(annotationLayer.getAllAnnotations()),
-    currentPage,
-    selectedPageNumbers: [...stateManager.state.selectedPageNumbers],
-  };
+  // 等待前一個 snapshot 完成，防止並發捕獲
+  await snapshotLock;
+  let resolveLock;
+  snapshotLock = new Promise(resolve => { resolveLock = resolve; });
+
+  try {
+    const pdfBytes = await documentEngine.createSnapshotBytes();
+    const annotations = cloneAnnotations(annotationLayer.getAllAnnotations());
+    return {
+      pdfBytes,
+      annotations,
+      currentPage,
+      selectedPageNumbers: [...stateManager.state.selectedPageNumbers],
+    };
+  } finally {
+    resolveLock();
+  }
 }
 
 async function restoreEditorSnapshot(snapshot) {
@@ -2736,28 +2939,95 @@ function cleanupThumbnailDragState() {
  * Returns target page number (integer, insert after) or null if cancelled.
  */
 async function openBatchMoveDialog(selectedPages, pageCount) {
+  // 預先渲染選取頁面的縮圖
+  const thumbSize = 80;
+  const thumbDataUrls = {};
+  await Promise.all(selectedPages.slice(0, 12).map(async (pNum) => {
+    try {
+      const pdfPage = await documentEngine.getPage(pNum);
+      const vp = pdfPage.getViewport({ scale: thumbSize / pdfPage.getViewport({ scale: 1 }).width });
+      const c = document.createElement('canvas');
+      c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      await pdfPage.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      thumbDataUrls[pNum] = c.toDataURL('image/jpeg', 0.7);
+    } catch { /* skip */ }
+  }));
+
   return showWorkflowDialog({
     title: '批量移動頁面',
-    description: `已選取 ${selectedPages.length} 頁（${selectedPages.slice(0, 5).join('、')}${selectedPages.length > 5 ? '…' : ''}）。請指定插入位置。`,
+    description: `已選取 ${selectedPages.length} 頁，請指定插入目標位置。`,
     submitLabel: '移動',
     buildContent(body) {
-      const panel = el('section', 'workflow-panel');
+      const layout = el('div', 'workflow-grid');
+      const left = el('section', 'workflow-panel');
+      const right = el('section', 'workflow-panel');
 
       const targetInput = document.createElement('input');
       targetInput.type = 'number';
       targetInput.className = 'form-input';
       targetInput.min = '0';
       targetInput.max = String(pageCount);
-      targetInput.placeholder = `0（第 1 頁前）～ ${pageCount}`;
+      targetInput.placeholder = `0 ~ ${pageCount}`;
       targetInput.value = '';
 
       const hint = el('p', 'workflow-help',
-        `輸入 0 表示移到第 1 頁之前，輸入 ${pageCount} 表示移到最後一頁之後。選取的頁碼：${selectedPages.join('、')}`
+        `輸入 0 = 移到第 1 頁之前；輸入 ${pageCount} = 移到最後頁之後。`
       );
 
-      panel.appendChild(buildFormGroup('插入到第 N 頁之後（0 = 文件開頭）', targetInput));
-      panel.appendChild(hint);
-      body.appendChild(panel);
+      // 目標頁預覽縮圖
+      const targetThumbWrap = el('div', 'batch-move-target-wrap');
+      const targetLabel = el('p', 'workflow-help', '↓ 目標位置預覽');
+      const targetCanvas = document.createElement('canvas');
+      targetCanvas.className = 'workflow-preview-page-canvas';
+      targetCanvas.style.maxWidth = '100%';
+      targetThumbWrap.appendChild(targetLabel);
+      targetThumbWrap.appendChild(targetCanvas);
+
+      targetInput.addEventListener('input', async () => {
+        const v = parseInt(targetInput.value, 10);
+        if (isNaN(v) || v < 0 || v > pageCount) return;
+        const showPage = v === 0 ? 1 : Math.min(v, pageCount);
+        try {
+          const pdfPage = await documentEngine.getPage(showPage);
+          const vp2 = pdfPage.getViewport({ scale: 120 / pdfPage.getViewport({ scale: 1 }).width });
+          targetCanvas.width = Math.round(vp2.width);
+          targetCanvas.height = Math.round(vp2.height);
+          targetCanvas.style.width = `${Math.round(vp2.width)}px`;
+          targetCanvas.style.height = `${Math.round(vp2.height)}px`;
+          await pdfPage.render({ canvasContext: targetCanvas.getContext('2d'), viewport: vp2 }).promise;
+          targetLabel.textContent = v === 0 ? '↓ 插入到第 1 頁之前' : `↓ 插入到第 ${v} 頁之後`;
+        } catch { /* skip */ }
+      });
+
+      left.appendChild(el('div', 'workflow-section-title', '設定'));
+      left.appendChild(buildFormGroup('插入到第 N 頁之後（0 = 文件開頭）', targetInput));
+      left.appendChild(hint);
+      left.appendChild(el('div', 'workflow-section-title', '目標頁預覽'));
+      left.appendChild(targetThumbWrap);
+
+      // 右側：選取頁面縮圖
+      right.appendChild(el('div', 'workflow-section-title', `已選取的頁面（${selectedPages.length} 頁）`));
+      const thumbGrid = el('div', 'batch-move-thumb-grid');
+      selectedPages.slice(0, 12).forEach((pNum) => {
+        const item = el('div', 'batch-move-thumb-item');
+        if (thumbDataUrls[pNum]) {
+          const img = document.createElement('img');
+          img.src = thumbDataUrls[pNum];
+          img.style.cssText = 'max-width:100%;border:1px solid var(--color-border);border-radius:3px;';
+          item.appendChild(img);
+        }
+        item.appendChild(el('div', 'batch-move-thumb-label', `第 ${pNum} 頁`));
+        thumbGrid.appendChild(item);
+      });
+      if (selectedPages.length > 12) {
+        thumbGrid.appendChild(el('div', 'batch-move-thumb-item batch-move-thumb-more',
+          `…還有 ${selectedPages.length - 12} 頁`));
+      }
+      right.appendChild(thumbGrid);
+
+      layout.appendChild(left);
+      layout.appendChild(right);
+      body.appendChild(layout);
 
       return {
         focus() { targetInput.focus(); targetInput.select(); },
@@ -3156,22 +3426,78 @@ async function handleAction({ action, value, page, files, source, fromPage, from
       if (!preset) break;
       stampPresetDraft = { ...preset };
       annotationLayer.setStampPreset(preset);
-      stateManager.patch({ selectedTool: 'stamp' });
-      document.getElementById('annotation-layer-root')
-        .querySelector('svg')
-        ?.style.setProperty('cursor', 'crosshair');
-      appRenderer.toast(
-        `已切換到印章工具（${preset.text}）。請在頁面上拖曳放置印章範圍。`,
-        'success'
-      );
+
+      if (preset.batchMode && preset.batchPages?.length > 1) {
+        // 批量蓋章：自動在各頁放置
+        appRenderer.toast(`正在批量蓋章（${preset.batchPages.length} 頁）…`, 'info', 6000);
+        const now = new Date().toISOString();
+        const batchAnns = [];
+        const sizePct = { small: 0.15, medium: 0.25, large: 0.35, xlarge: 0.50 }[preset.batchSize] ?? 0.25;
+        for (const pNum of preset.batchPages) {
+          try {
+            const pdfPage = await documentEngine.getPage(pNum);
+            const [ax1, ay1, ax2, ay2] = pdfPage.view;
+            const physW = Math.abs(ax2 - ax1);
+            const physH = Math.abs(ay2 - ay1);
+            const pageRot = ((pdfPage.rotate ?? 0) % 360 + 360) % 360;
+            // 視覺顯示尺寸（旋轉90°/270°時寬高互換）
+            const dispW = (pageRot === 90 || pageRot === 270) ? physH : physW;
+            const dispH = (pageRot === 90 || pageRot === 270) ? physW : physH;
+            // 使用用戶選擇的大小比例
+            const aspectRatio = 2.2; // 橢圓寬高比
+            const sh = Math.min(dispW, dispH) * sizePct;
+            const sw = sh * aspectRatio;
+            const margin = 24;
+            // 以視覺螢幕座標系（y朝下，左上角為原點）計算位置
+            let sx, sy;
+            switch (preset.batchPosition) {
+              case 'bottom-right': sx = dispW - sw - margin; sy = dispH - sh - margin; break;
+              case 'bottom-left':  sx = margin;               sy = dispH - sh - margin; break;
+              case 'top-right':    sx = dispW - sw - margin; sy = margin; break;
+              case 'top-left':     sx = margin;               sy = margin; break;
+              default:             sx = (dispW - sw) / 2;     sy = (dispH - sh) / 2;
+            }
+            // 轉換為物理 PDF 座標（左下角原點，考慮旋轉）
+            const physRect = screenRectToPdfRect(
+              { x: sx, y: sy, width: sw, height: sh },
+              { pageWidthPt: physW, pageHeightPt: physH, rotation: pageRot, screenWidth: dispW, screenHeight: dispH }
+            );
+            const dateStr = preset.includeDate
+              ? new Intl.DateTimeFormat('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' })
+                  .format(new Date()).replaceAll('/', '.')
+              : '';
+            batchAnns.push({
+              id: crypto.randomUUID(), type: 'stamp', pageNumber: pNum,
+              content: preset.includeDate ? `${preset.text}\n${dateStr}` : preset.text,
+              geometry: { x: physRect.x, y: physRect.y, width: physRect.width, height: physRect.height },
+              style: { color: preset.color, opacity: 1,
+                       fontSize: Math.max(10, physRect.height * 0.38), rotation: 0, strokeWidth: 1.5 },
+              createdAt: now, modifiedAt: now,
+            });
+          } catch { /* 跳過無法取得的頁 */ }
+        }
+        if (batchAnns.length) {
+          annotationLayer.placeBatchAnnotations(batchAnns);
+          appRenderer.toast(`已在 ${batchAnns.length} 頁批量蓋印「${preset.text}」`, 'success');
+        }
+        stateManager.patch({ selectedTool: 'select' });
+      } else {
+        stateManager.patch({ selectedTool: 'stamp' });
+        document.getElementById('annotation-layer-root')
+          .querySelector('svg')
+          ?.style.setProperty('cursor', 'crosshair');
+        appRenderer.toast(
+          `已切換到印章工具（${preset.text}）。請在頁面上拖曳放置印章範圍。`,
+          'success'
+        );
+      }
       break;
     }
     case 'tool-signature': {
       const preset = await openSignatureDialog();
       if (!preset) break;
-      signaturePresetDraft = structuredClone(preset);
+      signaturePresetDraft = { ...preset };
       annotationLayer.setSignaturePreset(preset);
-      // Store pending info; manifest entry is committed on annotation:add (captures actual page)
       pendingSignatureInfo = {
         signerName: preset.signerName ?? '簽署者',
         title:      preset.sigTitle ?? '',
@@ -3183,14 +3509,63 @@ async function handleAction({ action, value, page, files, source, fromPage, from
         }).format(new Date()).replaceAll('/', '.'),
       };
 
-      stateManager.patch({ selectedTool: 'signature', toolHubTab: 'esign' });
-      document.getElementById('annotation-layer-root')
-        .querySelector('svg')
-        ?.style.setProperty('cursor', 'crosshair');
-      appRenderer.toast(
-        `已切換到電子簽署工具（${pendingSignatureInfo.signerName}）。請回到頁面拖曳放置範圍。`,
-        'success'
-      );
+      if (preset.batchMode && preset.batchPages?.length > 1) {
+        // 批量電子簽署：自動在各頁放置
+        appRenderer.toast(`正在批量電子簽署（${preset.batchPages.length} 頁）…`, 'info', 6000);
+        const now = new Date().toISOString();
+        const batchAnns = [];
+        const sizePct = { small: 0.15, medium: 0.25, large: 0.35, xlarge: 0.50 }[preset.batchSize] ?? 0.30;
+        for (const pNum of preset.batchPages) {
+          try {
+            const pdfPage = await documentEngine.getPage(pNum);
+            const [ax1, ay1, ax2, ay2] = pdfPage.view;
+            const physW = Math.abs(ax2 - ax1);
+            const physH = Math.abs(ay2 - ay1);
+            const pageRot = ((pdfPage.rotate ?? 0) % 360 + 360) % 360;
+            const dispW = (pageRot === 90 || pageRot === 270) ? physH : physW;
+            const dispH = (pageRot === 90 || pageRot === 270) ? physW : physH;
+            // 使用用戶選擇的大小
+            const sh = Math.min(dispW, dispH) * sizePct;
+            const sw = sh * 2.5; // 簽署框較寬
+            const margin = 24;
+            let sx, sy;
+            switch (preset.batchPosition) {
+              case 'bottom-right':  sx = dispW - sw - margin; sy = dispH - sh - margin; break;
+              case 'bottom-center': sx = (dispW - sw) / 2;    sy = dispH - sh - margin; break;
+              case 'top-right':     sx = dispW - sw - margin; sy = margin; break;
+              default:              sx = (dispW - sw) / 2;    sy = (dispH - sh) / 2;
+            }
+            const sigPhysRect = screenRectToPdfRect(
+              { x: sx, y: sy, width: sw, height: sh },
+              { pageWidthPt: physW, pageHeightPt: physH, rotation: pageRot, screenWidth: dispW, screenHeight: dispH }
+            );
+            // 記錄到簽署記錄
+            signatureManifest.push({ ...pendingSignatureInfo, pageNumber: pNum });
+            batchAnns.push({
+              id: crypto.randomUUID(), type: 'signature', pageNumber: pNum,
+              geometry: { x: sigPhysRect.x, y: sigPhysRect.y, width: sigPhysRect.width, height: sigPhysRect.height },
+              style: { opacity: 1, rotation: 0 },
+              dataUrl: preset.dataUrl,
+              signerName: preset.signerName,
+              createdAt: now, modifiedAt: now,
+            });
+          } catch { /* 跳過無法取得的頁 */ }
+        }
+        if (batchAnns.length) {
+          annotationLayer.placeBatchAnnotations(batchAnns);
+          appRenderer.toast(`已在 ${batchAnns.length} 頁批量電子簽署（${pendingSignatureInfo.signerName}）`, 'success');
+        }
+        stateManager.patch({ selectedTool: 'select', toolHubTab: 'esign' });
+      } else {
+        stateManager.patch({ selectedTool: 'signature', toolHubTab: 'esign' });
+        document.getElementById('annotation-layer-root')
+          .querySelector('svg')
+          ?.style.setProperty('cursor', 'crosshair');
+        appRenderer.toast(
+          `已切換到電子簽署工具（${pendingSignatureInfo.signerName}）。請回到頁面拖曳放置範圍。`,
+          'success'
+        );
+      }
       break;
     }
 
@@ -3256,12 +3631,11 @@ async function handleAction({ action, value, page, files, source, fromPage, from
       break;
     case 'toggle-sidebar':
       stateManager.patch({ sidebarOpen: !state.sidebarOpen });
-      // state.sidebarOpen = old value (true=was open ??now closing ??add 'sidebar-closed')
-      document.getElementById('workspace').classList.toggle('sidebar-closed', state.sidebarOpen);
+      document.getElementById('workspace').classList.toggle('sidebar-closed', !state.sidebarOpen);
       break;
     case 'toggle-inspector':
       stateManager.patch({ inspectorOpen: !state.inspectorOpen });
-      document.getElementById('workspace').classList.toggle('inspector-closed', state.inspectorOpen);
+      document.getElementById('workspace').classList.toggle('inspector-closed', !state.inspectorOpen);
       break;
     case 'dark-mode':
       document.documentElement.setAttribute(
@@ -3545,6 +3919,10 @@ annotationLayer.init(canvasLayer, documentEngine);
   };
 
   eventBus.on('document:loaded', async ({ pageCount, fileName, fileHash, source = 'open', currentPage = 1 }) => {
+    // 重置上一個文檔的簽署記錄
+    signatureManifest = [];
+    pendingSignatureInfo = null;
+
     const isFreshOpen = source === 'open';
     let targetPage = Math.min(Math.max(currentPage, 1), pageCount || 1);
     let targetZoom = isFreshOpen ? 1.0 : stateManager.state.zoom;

@@ -3,6 +3,7 @@ const DEFAULT_SIGNATURE_HEIGHT = 180;
 
 function escapeSvgText(value) {
   return String(value ?? '')
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '') // 移除控制字符
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

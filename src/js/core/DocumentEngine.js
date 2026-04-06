@@ -720,13 +720,21 @@ class DocumentEngine {
         x: block.x,
         y: block.y,
       }, visualViewport);
+      // pdf-lib rotates images around their bottom-left corner.
+      // Adjust pivot so the rotated image lands at the intended visual position.
+      const pageRot = visualViewport?.rotation ?? 0;
+      let px = origin.x;
+      let py = origin.y;
+      if (pageRot === 90)       { py += block.width; }
+      else if (pageRot === 180) { px += block.width; py += block.height; }
+      else if (pageRot === 270) { px += block.height; }
       page.drawImage(image, {
-        x: origin.x,
-        y: origin.y,
+        x: px,
+        y: py,
         width: block.width,
         height: block.height,
         opacity,
-        rotate: window.PDFLib.degrees(0 - (visualViewport?.rotation ?? 0)),
+        rotate: window.PDFLib.degrees(0 - pageRot),
       });
       return true;
     } catch (error) {
@@ -775,12 +783,20 @@ class DocumentEngine {
         x: layout.x,
         y: layout.y,
       }, visualViewport);
+      // 補正 pdf-lib 以底左角為旋轉軸的偏移，使浮水印落在正確視覺位置
+      const wmPageRot = visualViewport?.rotation ?? 0;
+      let wmX = origin.x;
+      let wmY = origin.y;
+      if (wmPageRot === 90)       { wmY += layout.width; }
+      else if (wmPageRot === 180) { wmX += layout.width; wmY += layout.height; }
+      else if (wmPageRot === 270) { wmX += layout.height; }
       page.drawImage(image, {
-        x: origin.x,
-        y: origin.y,
+        x: wmX,
+        y: wmY,
         width: layout.width,
         height: layout.height,
         opacity,
+        rotate: window.PDFLib.degrees(0 - wmPageRot),
       });
       return true;
     } catch (error) {
@@ -864,6 +880,7 @@ class DocumentEngine {
 
   #escapeSvgText(value) {
     return String(value ?? '')
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, '') // 移除控制字符
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -1186,6 +1203,7 @@ class DocumentEngine {
         size: fontSize,
         color: rgb(c.r, c.g, c.b),
         font: textFont,
+        rotate: window.PDFLib.degrees(-visualViewport.rotation),
       });
 
       if (includeTimestamp && layout.timestamp) {
@@ -1199,6 +1217,7 @@ class DocumentEngine {
           size: layout.timestamp.fontSize,
           color: rgb(c.r, c.g, c.b),
           font: textFont,
+          rotate: window.PDFLib.degrees(-visualViewport.rotation),
         });
       }
       visibleIndex++;
@@ -1258,13 +1277,19 @@ class DocumentEngine {
           x: layout.x,
           y: layout.y,
         }, visualViewport);
+        // 補正 pdf-lib 以底左角為旋轉軸的偏移（與 #drawTextWatermarkAsImage 相同邏輯）
+        let imgWmX = point.x;
+        let imgWmY = point.y;
+        if (pageRotation === 90)       { imgWmY += layout.width; }
+        else if (pageRotation === 180) { imgWmX += layout.width; imgWmY += layout.height; }
+        else if (pageRotation === 270) { imgWmX += layout.height; }
         page.drawImage(watermarkImage, {
-          x: point.x,
-          y: point.y,
+          x: imgWmX,
+          y: imgWmY,
           width: layout.width,
           height: layout.height,
           opacity,
-          rotate: degrees(rotation - pageRotation),
+          rotate: degrees(rotation),
         });
         continue;
       }
@@ -1299,7 +1324,7 @@ class DocumentEngine {
         color: rgb(c.r, c.g, c.b),
         font: textFont,
         opacity,
-        rotate: degrees(rotation - pageRotation),
+        rotate: degrees(rotation),
         lineHeight: layout.lineHeight,
         maxWidth: box.width - 72,
       });

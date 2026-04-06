@@ -22,13 +22,18 @@ export function resolvePageNumberLayout({
   let x = marginPt;
   let y = marginPt;
 
-  if (position.includes('top')) {
-    y = pageHeight - marginPt - blockHeight;
-  }
-  if (position.includes('center')) {
+  if (position === 'center') {
     x = (pageWidth - blockWidth) / 2;
-  } else if (position.includes('right')) {
-    x = pageWidth - marginPt - blockWidth;
+    y = (pageHeight - blockHeight) / 2;
+  } else {
+    if (position.includes('top')) {
+      y = pageHeight - marginPt - blockHeight;
+    }
+    if (position.includes('center')) {
+      x = (pageWidth - blockWidth) / 2;
+    } else if (position.includes('right')) {
+      x = pageWidth - marginPt - blockWidth;
+    }
   }
 
   const textX = x + ((blockWidth - textWidth) / 2);

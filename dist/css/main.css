@@ -1072,6 +1072,113 @@ html, body {
   box-shadow: 0 0 0 2px var(--color-accent-subtle);
 }
 
+/* ---- Preview Zoom Lightbox ---- */
+.preview-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.80);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  cursor: zoom-out;
+}
+.preview-zoom-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  cursor: default;
+}
+.preview-zoom-close {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.25rem;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  font-size: 1.25rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.preview-zoom-close:hover { background: rgba(255, 255, 255, 0.30); }
+
+/* ---- Signature Preview Composite ---- */
+.sig-preview-composite {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  max-width: 100%;
+}
+.sig-preview-page-canvas {
+  display: block;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+.sig-preview-overlay {
+  position: absolute;
+  right: 8%;
+  bottom: 8%;
+  width: 40%;
+  max-height: 30%;
+  object-fit: contain;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+/* ---- Batch Move Thumbnails ---- */
+.batch-move-thumb-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--sp-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.batch-move-thumb-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+.batch-move-thumb-item img {
+  width: 72px;
+  height: 100px;
+  object-fit: contain;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-sunken);
+  transition: border-color 0.15s;
+}
+.batch-move-thumb-item img:hover { border-color: var(--color-accent); }
+.batch-move-thumb-label {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+}
+.batch-move-target-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.batch-move-thumb-more {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  align-self: center;
+  padding: var(--sp-2);
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 1099px) {
   #workspace {

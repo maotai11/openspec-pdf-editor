@@ -41,6 +41,7 @@ const SHORTCUTS = [
   { key: 'd',                                      action: 'tool-draw' },
   { key: 't',                                      action: 'tool-text' },
   { key: 'r',                                      action: 'tool-rect' },
+  { key: 's',                                      action: 'tool-stamp' },
   { key: 'g',                                      action: 'tool-signature' },
 ];
 

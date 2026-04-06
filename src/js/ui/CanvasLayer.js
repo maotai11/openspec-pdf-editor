@@ -14,6 +14,8 @@ export class CanvasLayer {
   #root       = document.getElementById('canvas-layer-root');
   #layerHost  = document.getElementById('layer-host');
   #engine     = null;   // DocumentEngine ref (set via init)
+  #stage      = document.getElementById('editor-stage');
+  #resizeObserver = null;
 
   // Pool: Map<pageNumber, { canvas, ctx, renderTask }>
   #pool       = new Map();
@@ -47,14 +49,24 @@ export class CanvasLayer {
     });
 
     // Rerender on resize
-    const resizeObserver = new ResizeObserver(() => {
+    if (!this.#stage) {
+      console.warn('[CanvasLayer] #editor-stage not found. ResizeObserver disabled.');
+      return;
+    }
+    this.#resizeObserver = new ResizeObserver(() => {
       if (stateManager.state.documentStatus === 'ready') {
         this.#dpr = window.devicePixelRatio || 1;
         this.#clearPool();
         this.render(this.#currentPage);
       }
     });
-    resizeObserver.observe(document.getElementById('editor-stage'));
+    this.#resizeObserver.observe(this.#stage);
+  }
+
+  /** Disconnect ResizeObserver for cleanup. */
+  destroy() {
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
   }
 
   async render(pageNumber) {
@@ -152,14 +164,17 @@ export class CanvasLayer {
     const state = stateManager.state;
     let scale = state.zoom;
 
+    if (!this.#stage) {
+      return page.getViewport({ scale: 1 });
+    }
+
     if (state.zoomMode === 'fitWidth') {
-      const stageWidth = document.getElementById('editor-stage').clientWidth - 48;
+      const stageWidth = this.#stage.clientWidth - 48;
       const naturalVp = page.getViewport({ scale: 1 });
       scale = stageWidth / naturalVp.width;
     } else if (state.zoomMode === 'fitPage') {
-      const stage = document.getElementById('editor-stage');
-      const stageW = stage.clientWidth - 48;
-      const stageH = stage.clientHeight - 48;
+      const stageW = this.#stage.clientWidth - 48;
+      const stageH = this.#stage.clientHeight - 48;
       const naturalVp = page.getViewport({ scale: 1 });
       scale = Math.min(stageW / naturalVp.width, stageH / naturalVp.height);
     }
