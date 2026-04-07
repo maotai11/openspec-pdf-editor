@@ -52,6 +52,19 @@ const capabilities = {
 const SAVE_STATUS_DISPLAY_MS = 2500;
 const RECENT_DOCS_KEY = 'openspec.recent-docs';
 const MAX_RECENT_DOCS = 8;
+
+// ---- Privacy Settings ----
+const PRIVACY_SETTINGS_KEY = 'openspec.privacy';
+
+function loadPrivacySettings() {
+  try {
+    return JSON.parse(localStorage.getItem(PRIVACY_SETTINGS_KEY) ?? '{}');
+  } catch { return {}; }
+}
+
+function savePrivacySettings(settings) {
+  localStorage.setItem(PRIVACY_SETTINGS_KEY, JSON.stringify(settings));
+}
 let signaturePresetDraft = buildTypedSignaturePreset({
   signerName: '簽署者',
   subtitle: '電子簽署',
@@ -401,6 +414,7 @@ function saveRecentDocs(entries) {
 }
 
 function rememberRecentDoc({ fileHash, fileName, pageCount }) {
+  if (loadPrivacySettings().disableRecentDocs) return;
   if (!fileHash || !fileName) return;
   const now = new Date().toISOString();
   const next = loadRecentDocs()
@@ -694,7 +708,7 @@ async function openDeleteConfirmDialog(pageNumber) {
 async function openSplitDialog(pageCount, defaultBaseName = 'document') {
   return showWorkflowDialog({
     title: '拆分 PDF',
-    description: '輸入頁面範圍，設定檔名前綴與輸出方式。',
+    description: '輸入頁面範圍，設定檔名前綴與輸出方式。拆分後的 PDF 不會包含目前編輯中的標註。',
     submitLabel: '開始拆分',
     buildContent(body) {
       const layout = el('div', 'workflow-grid');
@@ -1882,6 +1896,48 @@ async function exportCurrentDocumentToOffice(state) {
   } catch (error) {
     appRenderer.toast(`Office 轉換失敗：${error.message}`, 'error');
   }
+}
+
+// ---- Privacy Settings Dialog ----
+
+async function openPrivacySettingsDialog() {
+  const current = loadPrivacySettings();
+  return showWorkflowDialog({
+    title: '隱私設定',
+    description: '控制本機資料的儲存行為。所有資料均留在你的裝置，不會上傳。',
+    submitLabel: '儲存設定',
+    buildContent(body) {
+      const noRecent = buildCheckbox('關閉最近開啟紀錄（不記錄開啟過哪些檔案）', current.disableRecentDocs ?? false);
+      const noSession = buildCheckbox('關閉自動還原上次工作（每次重新開啟時不套用上次的標註）', current.disableSessionRestore ?? false);
+
+      const clearBtn = el('button', 'btn btn-danger', '立即清除所有痕跡');
+      clearBtn.addEventListener('click', async () => {
+        saveRecentDocs([]);
+        await sessionDB.clearAll();
+        appRenderer.toast('已清除所有最近紀錄與工作階段', 'success');
+        clearBtn.textContent = '已清除 ✓';
+        clearBtn.disabled = true;
+      });
+
+      body.appendChild(noRecent.wrapper);
+      body.appendChild(noSession.wrapper);
+      body.appendChild(el('hr', ''));
+      body.appendChild(el('div', 'workflow-section-title', '立即清除'));
+      body.appendChild(el('div', 'workflow-help', '一次清除：最近開啟紀錄、所有工作階段（annotations 暫存）'));
+      body.appendChild(clearBtn);
+
+      return {
+        focus() {},
+        getValue() {
+          return {
+            disableRecentDocs: noRecent.input.checked,
+            disableSessionRestore: noSession.input.checked,
+          };
+        },
+        validate() { return ''; },
+      };
+    },
+  });
 }
 
 // ---- Export as Image Dialog ----
@@ -3954,15 +4010,19 @@ async function handleAction({ action, value, page, files, source, fromPage, from
         if (!files.length) return;
         appRenderer.toast(`正在合併 ${files.length} 份 PDF…`, 'info', 8000);
         try {
-          if (stateManager.state.documentStatus !== 'ready') {
-            await documentEngine.createNew();
-            stateManager.patch({ documentStatus: 'loading' });
-          }
-          for (const file of files) {
-            const buf = await file.arrayBuffer();
-            await documentEngine.mergePdf(buf, stateManager.state.currentPage);
-          }
-          appRenderer.toast('PDF 合併完成', 'success');
+          await runUndoableDocumentMutation({
+            description: `合併 ${files.length} 份 PDF`,
+            mutate: async () => {
+              if (stateManager.state.documentStatus !== 'ready') {
+                await documentEngine.createNew();
+              }
+              for (const file of files) {
+                const buf = await file.arrayBuffer();
+                await documentEngine.mergePdf(buf, stateManager.state.currentPage);
+              }
+            },
+            successMessage: `PDF 合併完成（${files.length} 份）`,
+          });
         } catch (err) {
           appRenderer.toast(`PDF 合併失敗：${err.message}`, 'error');
         }
@@ -3999,7 +4059,9 @@ async function handleAction({ action, value, page, files, source, fromPage, from
           const a = document.createElement('a'); a.href = url; a.download = `${splitPrefix}_split.zip`; a.click();
           setTimeout(() => URL.revokeObjectURL(url), 60000);
         } else {
-          for (const r of named) {
+          for (let idx = 0; idx < named.length; idx++) {
+            const r = named[idx];
+            await new Promise(resolve => setTimeout(resolve, idx * 200));
             const blob = new Blob([r.bytes], { type: 'application/pdf' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a'); a.href = url; a.download = r.name; a.click();
@@ -4058,6 +4120,14 @@ async function handleAction({ action, value, page, files, source, fromPage, from
     case 'clear-sessions':
       sessionDB.clearAll().then(() => appRenderer.toast('已清除暫存工作階段', 'success'));
       break;
+
+    case 'privacy-settings': {
+      const result = await openPrivacySettingsDialog();
+      if (!result) break;
+      savePrivacySettings(result);
+      appRenderer.toast('隱私設定已儲存', 'success');
+      break;
+    }
 
     case 'about':
       appRenderer.toast('OpenSpec PDF Editor v0.1.0-alpha', 'info', 5000);
@@ -4125,7 +4195,8 @@ annotationLayer.init(canvasLayer, documentEngine);
     }
 
     if (isFreshOpen) {
-      const session = await sessionDB.load(fileHash);
+      const privacy = loadPrivacySettings();
+      const session = privacy.disableSessionRestore ? null : await sessionDB.load(fileHash);
       if (session) {
         annotationLayer.restoreAnnotations(session.annotations ?? []);
         targetPage = Math.min(Math.max(session.lastPage ?? 1, 1), pageCount || 1);

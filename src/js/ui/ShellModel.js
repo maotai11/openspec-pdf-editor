@@ -87,6 +87,8 @@ export function buildMenuModel(state) {
         { type: 'separator' },
         { id: 'clear-sessions', label: '清除暫存工作階段' },
         { type: 'separator' },
+        { id: 'privacy-settings', label: '🔒 隱私設定…' },
+        { type: 'separator' },
         { id: 'show-signature-manifest', label: '簽署記錄', disabled: !hasDoc },
         { type: 'separator' },
         { id: 'about', label: '關於 OpenSpec' },
