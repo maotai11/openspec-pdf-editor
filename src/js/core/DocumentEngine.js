@@ -563,6 +563,8 @@ class DocumentEngine {
     if (!g.width || !g.height) return false;
 
     try {
+      const pageRot = page.getRotation().angle;
+      const isRotated = pageRot === 90 || pageRot === 270;
       const rotation = normalizeAnnotationRotation(annotation.style?.rotation ?? 0);
       const opacity = annotation.style?.opacity ?? 1;
       const color = annotation.style?.color ?? '#C00000';
@@ -581,8 +583,12 @@ class DocumentEngine {
       const line1Y = hasDate ? g.height * 0.42 : g.height * 0.54;
       const line2Y = g.height * 0.74;
       const dividerY = g.height * 0.56;
+      // SVG 渲染尺寸：旋轉頁時使用視覺尺寸（寬高互換）
+      const svgW = isRotated ? bounds.height : bounds.width;
+      const svgH = isRotated ? bounds.width : bounds.height;
+      const scale = svgW / Math.max(1, bounds.width);
       const svg = [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${bounds.width}" height="${bounds.height}" viewBox="0 0 ${bounds.width} ${bounds.height}">`,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${bounds.width} ${bounds.height}">`,
         `<g transform="translate(${-bounds.minX} ${-bounds.minY})">`,
         `<g transform="rotate(${rotation} ${center.x} ${center.y})">`,
         `<ellipse cx="${center.x}" cy="${center.y}" rx="${g.width / 2}" ry="${g.height / 2}" fill="none" stroke="${color}" stroke-width="${strokeWidth}"/>`,
@@ -608,14 +614,38 @@ class DocumentEngine {
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, bounds.width, bounds.height, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, 3);
       const image = await pdfDoc.embedPng(pngBytes);
+      // 錨點依 pageRot 計算
+      let ax, ay, drawW, drawH;
+      if (pageRot === 0) {
+        ax = g.x + bounds.minX;
+        ay = g.y + g.height - bounds.maxY;
+        drawW = bounds.width;
+        drawH = bounds.height;
+      } else if (pageRot === 90) {
+        ax = g.x + bounds.maxX;
+        ay = g.y + g.height - bounds.maxY;
+        drawW = bounds.height;
+        drawH = bounds.width;
+      } else if (pageRot === 180) {
+        ax = g.x + bounds.maxX;
+        ay = g.y + g.height - bounds.minY;
+        drawW = bounds.width;
+        drawH = bounds.height;
+      } else if (pageRot === 270) {
+        ax = g.x + bounds.minX;
+        ay = g.y + g.height - bounds.minY;
+        drawW = bounds.height;
+        drawH = bounds.width;
+      }
       page.drawImage(image, {
-        x: g.x + bounds.minX,
-        y: g.y + g.height - bounds.maxY,
-        width: bounds.width,
-        height: bounds.height,
+        x: ax,
+        y: ay,
+        width: drawW,
+        height: drawH,
         opacity,
+        rotate: window.PDFLib.degrees(pageRot),
       });
       return true;
     } catch (error) {
@@ -629,6 +659,8 @@ class DocumentEngine {
     if (!g.width || !g.height) return false;
 
     try {
+      const pageRot = page.getRotation().angle;
+      const isRotated = pageRot === 90 || pageRot === 270;
       const rotation = normalizeAnnotationRotation(annotation.style?.rotation ?? 0);
       const opacity = annotation.style?.opacity ?? 1;
       const dataUrl = annotation.signatureData?.dataUrl ?? buildTypedSignaturePreset({
@@ -645,8 +677,11 @@ class DocumentEngine {
         { x: g.width, y: g.height },
         { x: 0, y: g.height },
       ].map((point) => rotatePoint(point, center, rotation)));
+      // SVG 渲染尺寸：旋轉頁時使用視覺尺寸（寬高互換）
+      const svgW = isRotated ? bounds.height : bounds.width;
+      const svgH = isRotated ? bounds.width : bounds.height;
       const svg = [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${bounds.width}" height="${bounds.height}" viewBox="0 0 ${bounds.width} ${bounds.height}">`,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${bounds.width} ${bounds.height}">`,
         `<g transform="translate(${-bounds.minX} ${-bounds.minY})">`,
         `<g transform="rotate(${rotation} ${center.x} ${center.y})">`,
         `<image href="${dataUrl}" x="0" y="0" width="${g.width}" height="${g.height}" preserveAspectRatio="xMidYMid meet"/>`,
@@ -654,14 +689,38 @@ class DocumentEngine {
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, bounds.width, bounds.height, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, 3);
       const image = await pdfDoc.embedPng(pngBytes);
+      // 錨點依 pageRot 計算
+      let ax, ay, drawW, drawH;
+      if (pageRot === 0) {
+        ax = g.x + bounds.minX;
+        ay = g.y + g.height - bounds.maxY;
+        drawW = bounds.width;
+        drawH = bounds.height;
+      } else if (pageRot === 90) {
+        ax = g.x + bounds.maxX;
+        ay = g.y + g.height - bounds.maxY;
+        drawW = bounds.height;
+        drawH = bounds.width;
+      } else if (pageRot === 180) {
+        ax = g.x + bounds.maxX;
+        ay = g.y + g.height - bounds.minY;
+        drawW = bounds.width;
+        drawH = bounds.height;
+      } else if (pageRot === 270) {
+        ax = g.x + bounds.minX;
+        ay = g.y + g.height - bounds.minY;
+        drawW = bounds.height;
+        drawH = bounds.width;
+      }
       page.drawImage(image, {
-        x: g.x + bounds.minX,
-        y: g.y + g.height - bounds.maxY,
-        width: bounds.width,
-        height: bounds.height,
+        x: ax,
+        y: ay,
+        width: drawW,
+        height: drawH,
         opacity,
+        rotate: window.PDFLib.degrees(pageRot),
       });
       return true;
     } catch (error) {
@@ -721,20 +780,17 @@ class DocumentEngine {
         y: block.y,
       }, visualViewport);
       // pdf-lib rotates images around their bottom-left corner.
-      // Adjust pivot so the rotated image lands at the intended visual position.
+      // Use the visual origin directly — page rotation is handled by the rotate parameter.
       const pageRot = visualViewport?.rotation ?? 0;
       let px = origin.x;
       let py = origin.y;
-      if (pageRot === 90)       { py += block.width; }
-      else if (pageRot === 180) { px += block.width; py += block.height; }
-      else if (pageRot === 270) { px += block.height; }
       page.drawImage(image, {
         x: px,
         y: py,
         width: block.width,
         height: block.height,
         opacity,
-        rotate: window.PDFLib.degrees(0 - pageRot),
+        rotate: window.PDFLib.degrees(pageRot),
       });
       return true;
     } catch (error) {
@@ -783,20 +839,18 @@ class DocumentEngine {
         x: layout.x,
         y: layout.y,
       }, visualViewport);
-      // 補正 pdf-lib 以底左角為旋轉軸的偏移，使浮水印落在正確視覺位置
+      // pdf-lib rotates images around their bottom-left corner.
+      // Use the visual origin directly — page rotation is handled by the rotate parameter.
       const wmPageRot = visualViewport?.rotation ?? 0;
       let wmX = origin.x;
       let wmY = origin.y;
-      if (wmPageRot === 90)       { wmY += layout.width; }
-      else if (wmPageRot === 180) { wmX += layout.width; wmY += layout.height; }
-      else if (wmPageRot === 270) { wmX += layout.height; }
       page.drawImage(image, {
         x: wmX,
         y: wmY,
         width: layout.width,
         height: layout.height,
         opacity,
-        rotate: window.PDFLib.degrees(0 - wmPageRot),
+        rotate: window.PDFLib.degrees(wmPageRot),
       });
       return true;
     } catch (error) {
@@ -1277,19 +1331,15 @@ class DocumentEngine {
           x: layout.x,
           y: layout.y,
         }, visualViewport);
-        // 補正 pdf-lib 以底左角為旋轉軸的偏移（與 #drawTextWatermarkAsImage 相同邏輯）
-        let imgWmX = point.x;
-        let imgWmY = point.y;
-        if (pageRotation === 90)       { imgWmY += layout.width; }
-        else if (pageRotation === 180) { imgWmX += layout.width; imgWmY += layout.height; }
-        else if (pageRotation === 270) { imgWmX += layout.height; }
+        // pdf-lib rotates images around their bottom-left corner.
+        // Page rotation is combined with user-specified rotation.
         page.drawImage(watermarkImage, {
-          x: imgWmX,
-          y: imgWmY,
+          x: point.x,
+          y: point.y,
           width: layout.width,
           height: layout.height,
           opacity,
-          rotate: degrees(rotation),
+          rotate: degrees(pageRotation + rotation),
         });
         continue;
       }

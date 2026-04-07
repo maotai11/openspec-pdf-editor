@@ -81,6 +81,7 @@ export function buildMenuModel(state) {
         { id: 'split', label: '拆分 PDF', disabled: !hasDoc },
         { id: 'img2pdf', label: '圖片轉 PDF' },
         { id: 'convert-office', label: '轉換為 Word / PowerPoint / Excel', disabled: !hasDoc },
+        { id: 'export-as-image', label: '匯出為圖片（PNG/JPEG）', disabled: !hasDoc },
         { id: 'protect-pdf', label: '保護 PDF', disabled: !hasDoc },
         { id: 'sign-and-save', label: '簽署並儲存…', disabled: !hasDoc },
         { type: 'separator' },

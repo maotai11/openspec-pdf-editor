@@ -1208,3 +1208,38 @@ html, body {
   }
   #thumbnail-panel { flex-direction: row; padding: var(--sp-2); }
 }
+
+/* ---- Annotation Selection & Resize Handles ---- */
+.selection-handle {
+  pointer-events: none;
+}
+
+.resize-handle {
+  pointer-events: all;
+  transition: fill 0.15s ease;
+}
+.resize-handle:hover {
+  fill: #3B82F6;
+  stroke: #FFFFFF;
+  stroke-width: 1.5;
+}
+
+/* Split dialog custom name inputs */
+.workflow-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: flex-start;
+}
+.workflow-chip-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.split-custom-name {
+  width: 100%;
+  min-width: 120px;
+  font-size: var(--text-xs);
+  padding: 2px 6px;
+}
+

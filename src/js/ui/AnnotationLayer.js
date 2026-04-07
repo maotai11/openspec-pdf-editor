@@ -47,6 +47,7 @@ export class AnnotationLayer {
 
   #selectedIds = new Set();
   #dragState = null;
+  #resizeState = null;
 
   #viewport = {
     pageWidthPt: 595,
@@ -180,6 +181,11 @@ export class AnnotationLayer {
       execute: () => {
         for (const ann of annotations) this.#addAnnotation(ann);
         this.#redraw();
+        // Select the last annotation so user can resize it
+        const lastAnn = annotations[annotations.length - 1];
+        this.#selectedIds.clear();
+        this.#selectedIds.add(lastAnn.id);
+        stateManager.patch({ selectedAnnotationIds: [lastAnn.id] });
       },
       undo: () => {
         for (const ann of annotations) this.#removeAnnotation(ann.id, ann.pageNumber);
@@ -281,6 +287,25 @@ export class AnnotationLayer {
   }
 
   #onPointerDown(event) {
+    // Check if clicking on a resize handle
+    const resizeTarget = event.target.closest('[data-resize-pos]');
+    if (resizeTarget) {
+      const annId = resizeTarget.getAttribute('data-id');
+      const pos = resizeTarget.getAttribute('data-resize-pos');
+      const annotation = this.#findAnnotation(annId);
+      if (annotation && (annotation.type === 'stamp' || annotation.type === 'signature' || annotation.type === 'rect' || annotation.type === 'circle' || annotation.type === 'highlight')) {
+        this.#resizeState = {
+          annotation,
+          startPos: this.#svgPoint(event),
+          origGeometry: this.#cloneAnnotation(annotation.geometry),
+          corner: pos,
+        };
+        this.#svg.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+    }
+
     const annotationTarget = event.target.closest('[data-id]');
     if (annotationTarget) {
       this.#handleSelectDown(event);
@@ -312,6 +337,11 @@ export class AnnotationLayer {
   }
 
   #onPointerMove(event) {
+    if (this.#resizeState) {
+      this.#handleResizeMove(event);
+      return;
+    }
+
     if (this.#dragState) {
       this.#handleDragMove(event);
       return;
@@ -336,6 +366,11 @@ export class AnnotationLayer {
   }
 
   async #onPointerUp(event) {
+    if (this.#resizeState) {
+      this.#handleResizeEnd(event);
+      return;
+    }
+
     if (this.#dragState) {
       this.#handleDragEnd(event);
       return;
@@ -755,6 +790,65 @@ export class AnnotationLayer {
     event.preventDefault();
   }
 
+  #handleResizeMove(event) {
+    const { annotation, startPos, origGeometry, corner } = this.#resizeState;
+    const current = this.#svgPoint(event);
+    const dx = current.x - startPos.x;
+    const dy = current.y - startPos.y;
+    const minSize = 20;
+
+    const g = { ...origGeometry };
+
+    // Adjust geometry based on which corner is being dragged
+    if (corner === 'br') {
+      g.width = Math.max(minSize, origGeometry.width + dx);
+      g.height = Math.max(minSize, origGeometry.height + dy);
+    } else if (corner === 'bl') {
+      g.x = origGeometry.x + dx;
+      g.width = Math.max(minSize, origGeometry.width - dx);
+      g.height = Math.max(minSize, origGeometry.height + dy);
+    } else if (corner === 'tr') {
+      g.y = origGeometry.y + dy;
+      g.width = Math.max(minSize, origGeometry.width + dx);
+      g.height = Math.max(minSize, origGeometry.height - dy);
+    } else if (corner === 'tl') {
+      g.x = origGeometry.x + dx;
+      g.y = origGeometry.y + dy;
+      g.width = Math.max(minSize, origGeometry.width - dx);
+      g.height = Math.max(minSize, origGeometry.height - dy);
+    }
+
+    annotation.geometry = g;
+    this.#redraw();
+    event.preventDefault();
+  }
+
+  #handleResizeEnd(event) {
+    const { annotation, origGeometry } = this.#resizeState;
+    const newGeometry = this.#cloneAnnotation(annotation.geometry);
+    this.#resizeState = null;
+
+    const cmd = {
+      execute: () => {
+        const current = this.#findAnnotation(annotation.id);
+        if (!current) return;
+        current.geometry = this.#cloneAnnotation(newGeometry);
+        this.#redraw();
+      },
+      undo: () => {
+        const current = this.#findAnnotation(annotation.id);
+        if (!current) return;
+        current.geometry = this.#cloneAnnotation(origGeometry);
+        this.#redraw();
+      },
+      description: `調整 ${this.#toolLabel(annotation.type)} 大小`,
+      estimatedBytes: JSON.stringify(newGeometry).length * 4,
+    };
+    commandStack.execute(cmd);
+    eventBus.emit('annotations:changed');
+    event.preventDefault();
+  }
+
   #translatePathData(pathData, dx, dy) {
     return pathData.replace(/([ML])\s+([\d.\-]+)\s+([\d.\-]+)/g, (_, cmd, x, y) => {
       return `${cmd} ${parseFloat(x) + dx} ${parseFloat(y) + dy}`;
@@ -950,6 +1044,34 @@ export class AnnotationLayer {
     handle.setAttribute('stroke-dasharray', '4 2');
     handle.setAttribute('pointer-events', 'none');
     this.#svg.appendChild(handle);
+
+    // Add resize handles for resizable annotation types (stamp, signature, rect, circle, highlight)
+    const resizableTypes = new Set(['stamp', 'signature', 'rect', 'circle', 'highlight']);
+    if (resizableTypes.has(annotation.type) && rect.width > 0 && rect.height > 0) {
+      const corners = [
+        { x: rect.x, y: rect.y, cursor: 'nwse-resize', pos: 'tl' },
+        { x: rect.x + rect.width, y: rect.y, cursor: 'nesw-resize', pos: 'tr' },
+        { x: rect.x, y: rect.y + rect.height, cursor: 'nesw-resize', pos: 'bl' },
+        { x: rect.x + rect.width, y: rect.y + rect.height, cursor: 'nwse-resize', pos: 'br' },
+      ];
+      const size = 8;
+      for (const corner of corners) {
+        const resizeHandle = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        resizeHandle.setAttribute('class', `resize-handle resize-${corner.pos}`);
+        resizeHandle.setAttribute('x', corner.x - size / 2);
+        resizeHandle.setAttribute('y', corner.y - size / 2);
+        resizeHandle.setAttribute('width', size);
+        resizeHandle.setAttribute('height', size);
+        resizeHandle.setAttribute('fill', '#2563EB');
+        resizeHandle.setAttribute('stroke', '#FFFFFF');
+        resizeHandle.setAttribute('stroke-width', '1');
+        resizeHandle.setAttribute('rx', '1');
+        resizeHandle.style.cursor = corner.cursor;
+        resizeHandle.setAttribute('data-id', annotation.id);
+        resizeHandle.setAttribute('data-resize-pos', corner.pos);
+        this.#svg.appendChild(resizeHandle);
+      }
+    }
   }
 
   #getAnnotationRotationCenter(annotation) {

@@ -722,6 +722,8 @@ async function openSplitDialog(pageCount, defaultBaseName = 'document') {
 
       const summary = el('div', 'workflow-preview-summary');
       const chips = el('div', 'workflow-chip-row');
+      const customNames = []; // Array of inputs for each range
+      const customNamesContainer = el('div', 'workflow-custom-names');
       const details = el('div', 'workflow-help');
 
       const update = () => {
@@ -729,17 +731,33 @@ async function openSplitDialog(pageCount, defaultBaseName = 'document') {
           ? parseSplitRanges(intent.value, pageCount)
           : Array.from({ length: pageCount }, (_, i) => ({ from: i + 1, to: i + 1 }));
         chips.innerHTML = '';
+        customNames.length = 0; // Clear without breaking refs
+        customNamesContainer.innerHTML = '';
         if (ranges.length === 0) {
           details.textContent = '目前還沒有辨識到可用的頁面範圍。';
           return;
         }
         const prefix = prefixInput.value.trim() || defaultBaseName;
         details.textContent = `將輸出 ${ranges.length} 份 PDF（${outputModeSelect.value === 'zip' ? '打包 ZIP' : '個別下載'}）`;
-        ranges.slice(0, 8).forEach((range, i) => {
+        ranges.slice(0, 20).forEach((range, i) => {
           const name = ranges.length === 1 ? `${prefix}.pdf` : `${prefix}_part${String(i + 1).padStart(2, '0')}.pdf`;
-          chips.appendChild(el('span', 'workflow-chip', range.from === range.to ? `p${range.from}` : `p${range.from}-${range.to}`));
-          chips.lastElementChild.title = name;
+          const chipWrapper = el('span', 'workflow-chip-wrapper');
+          const chip = el('span', 'workflow-chip', range.from === range.to ? `p${range.from}` : `p${range.from}-${range.to}`);
+          chip.title = name;
+          chipWrapper.appendChild(chip);
+          // Custom name input
+          const nameInput = document.createElement('input');
+          nameInput.type = 'text';
+          nameInput.className = 'form-input split-custom-name';
+          nameInput.placeholder = name;
+          nameInput.dataset.index = String(i);
+          chipWrapper.appendChild(nameInput);
+          customNames.push(nameInput);
+          chips.appendChild(chipWrapper);
         });
+        if (ranges.length > 20) {
+          chips.appendChild(el('span', 'workflow-chip workflow-chip-more', `…還有 ${ranges.length - 20} 份`));
+        }
       };
 
       left.appendChild(el('div', 'workflow-section-title', '拆分設定'));
@@ -766,10 +784,12 @@ async function openSplitDialog(pageCount, defaultBaseName = 'document') {
           const ranges = intent.value.trim()
             ? parseSplitRanges(intent.value, pageCount)
             : Array.from({ length: pageCount }, (_, i) => ({ from: i + 1, to: i + 1 }));
+          const customNamesList = customNames.map(input => input.value.trim());
           return {
             ranges,
             prefix: prefixInput.value.trim() || defaultBaseName,
             outputMode: outputModeSelect.value,
+            customNames: customNamesList,
           };
         },
         validate(value) {
@@ -1864,6 +1884,106 @@ async function exportCurrentDocumentToOffice(state) {
   }
 }
 
+// ---- Export as Image Dialog ----
+
+async function openExportImageDialog(state) {
+  const pageCount = state.pageCount;
+  return showWorkflowDialog({
+    title: '匯出為圖片',
+    description: '選擇格式、解析度與頁面範圍，將每頁匯出為 PNG 或 JPEG 圖片。',
+    submitLabel: '匯出',
+    buildContent(body) {
+      const layout = el('div', 'workflow-grid');
+      const left = el('section', 'workflow-panel');
+      const right = el('section', 'workflow-panel workflow-preview-shell');
+
+      const formatSelect = buildSelect([
+        ['png', 'PNG（無損，檔案較大）'],
+        ['jpeg', 'JPEG（有損壓縮，檔案較小）'],
+      ], 'png');
+
+      const dpiSelect = buildSelect([
+        ['150', '150 DPI（一般用途）'],
+        ['200', '200 DPI（高解析度）'],
+        ['300', '300 DPI（列印品質）'],
+      ], '150');
+
+      const qualityInput = document.createElement('input');
+      qualityInput.type = 'number';
+      qualityInput.className = 'form-input';
+      qualityInput.min = '0.1';
+      qualityInput.max = '1';
+      qualityInput.step = '0.1';
+      qualityInput.value = '0.92';
+
+      const pageScope = buildPageScopeControls(pageCount, state.currentPage, {
+        mode: 'all', fromPage: 1, toPage: pageCount,
+      });
+
+      const chips = el('div', 'workflow-chip-row');
+      const summary = el('div', 'workflow-help');
+
+      const updateSummary = () => {
+        chips.innerHTML = '';
+        const scope = pageScope.read();
+        chips.appendChild(el('span', 'workflow-chip', formatSelect.value === 'png' ? 'PNG' : `JPEG ${qualityInput.value}`));
+        chips.appendChild(el('span', 'workflow-chip', `${dpiSelect.value} DPI`));
+        chips.appendChild(el('span', 'workflow-chip', `${scope.pages.length} 頁`));
+        summary.textContent = `將輸出 ${scope.pages.length} 張圖片。`;
+      };
+
+      left.appendChild(el('div', 'workflow-section-title', '圖片設定'));
+      left.appendChild(buildFormGroup('格式', formatSelect));
+      left.appendChild(buildFormGroup('解析度', dpiSelect));
+      const qualityGroup = buildFormGroup('JPEG 品質（0.1–1.0）', qualityInput);
+      qualityGroup.style.display = formatSelect.value === 'jpeg' ? '' : 'none';
+      left.appendChild(qualityGroup);
+      left.appendChild(buildFormGroup('匯出頁面', pageScope.scopeSelect));
+      left.appendChild(pageScope.rangeRow);
+      left.appendChild(pageScope.pagesRow);
+      left.appendChild(pageScope.summary);
+
+      right.appendChild(el('div', 'workflow-section-title', '匯出摘要'));
+      right.appendChild(chips);
+      right.appendChild(summary);
+
+      layout.appendChild(left);
+      layout.appendChild(right);
+      body.appendChild(layout);
+
+      formatSelect.addEventListener('change', () => {
+        qualityGroup.style.display = formatSelect.value === 'jpeg' ? '' : 'none';
+        updateSummary();
+      });
+      dpiSelect.addEventListener('change', updateSummary);
+      qualityInput.addEventListener('input', updateSummary);
+      pageScope.scopeSelect.addEventListener('change', updateSummary);
+      pageScope.fromInput.addEventListener('input', updateSummary);
+      pageScope.toInput.addEventListener('input', updateSummary);
+      pageScope.pagesInput.addEventListener('input', updateSummary);
+      updateSummary();
+
+      return {
+        focus() { formatSelect.focus(); },
+        getValue() {
+          const scope = pageScope.read();
+          return {
+            format: formatSelect.value,
+            dpi: Number(dpiSelect.value),
+            quality: Number(qualityInput.value) || 0.92,
+            pages: scope.pages,
+          };
+        },
+        validate(value) {
+          if (!value.pages?.length) return '請選擇至少一頁。';
+          if (value.format === 'jpeg' && (value.quality < 0.1 || value.quality > 1)) return 'JPEG 品質必須在 0.1–1.0 之間。';
+          return '';
+        },
+      };
+    },
+  });
+}
+
 async function openStampDialog() {
   const { pageCount, currentPage } = stateManager.state;
   return showWorkflowDialog({
@@ -2476,9 +2596,9 @@ function setupPasswordModal() {
 async function openFileDialog() {
   if (capabilities.openFilePicker) {
     try {
-      const [handle] = await window.showOpenFilePicker({
+      const handles = await window.showOpenFilePicker({
         excludeAcceptAllOption: false,
-        multiple: false,
+        multiple: true,
         types: [{
           description: 'PDF 與圖片',
           accept: {
@@ -2489,7 +2609,8 @@ async function openFileDialog() {
           },
         }],
       });
-      return handle ? await handle.getFile() : null;
+      const files = await Promise.all(handles.map(h => h.getFile()));
+      return files.length > 0 ? files : null;
     } catch (error) {
       if (error?.name === 'AbortError') return null;
       console.warn('[OpenSpec] showOpenFilePicker failed, falling back to file input:', error);
@@ -2498,12 +2619,12 @@ async function openFileDialog() {
 
   const input = document.createElement('input');
   input.type = 'file';
-  // Accept PDF + images ??images are auto-converted to PDF before loading
+  // Accept PDF + images -- images are auto-converted to PDF before loading
   input.accept = '.pdf,application/pdf,image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp';
-  input.multiple = false;
+  input.multiple = true;
   input.click();
   return new Promise((resolve) => {
-    input.onchange = () => resolve(input.files[0] ?? null);
+    input.onchange = () => resolve(input.files?.length > 0 ? Array.from(input.files) : null);
     input.oncancel = () => resolve(null);
   });
 }
@@ -2633,6 +2754,11 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
         });
       };
 
+      // 建立預覽元素一次，updateSummary 只更新內容
+      const preview = el('div', 'workflow-preview-page');
+      const previewCard = el('div', 'workflow-crop-preview');
+      preview.appendChild(previewCard);
+
       const updateSummary = async () => {
         customMarginInput.disabled = marginSelect.value !== 'custom';
         const firstFile = orderedFiles[0];
@@ -2665,18 +2791,15 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
           ? `邊距 ${customMarginInput.value} mm`
           : IMAGE_MARGIN_OPTIONS.find(([value]) => value === marginSelect.value)?.[1] ?? '標準邊距'));
 
-        right.innerHTML = '';
-        right.appendChild(el('div', 'workflow-section-title', '輸出摘要'));
-        right.appendChild(summary);
-        const preview = el('div', 'workflow-preview-page');
+        // 更新預覽（不用 innerHTML = '' 清除）
         preview.style.aspectRatio = `${pageSize.width} / ${pageSize.height}`;
-        const card = el('div', 'workflow-crop-preview');
-        card.style.left = `${(draw.x / pageSize.width) * 100}%`;
-        card.style.top = `${100 - ((draw.y + draw.height) / pageSize.height) * 100}%`;
-        card.style.width = `${(draw.width / pageSize.width) * 100}%`;
-        card.style.height = `${(draw.height / pageSize.height) * 100}%`;
-        preview.appendChild(card);
-        right.appendChild(preview);
+        previewCard.style.left = `${(draw.x / pageSize.width) * 100}%`;
+        previewCard.style.top = `${100 - ((draw.y + draw.height) / pageSize.height) * 100}%`;
+        previewCard.style.width = `${(draw.width / pageSize.width) * 100}%`;
+        previewCard.style.height = `${(draw.height / pageSize.height) * 100}%`;
+        previewCard.style.border = '2px solid var(--color-accent)';
+        previewCard.style.background = 'oklch(95% 0.02 250 / 0.3)';
+        previewCard.style.borderRadius = 'var(--radius-sm)';
       };
 
       left.appendChild(el('div', 'workflow-section-title', '版面設定'));
@@ -2690,6 +2813,11 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
       layout.appendChild(left);
       layout.appendChild(right);
       body.appendChild(layout);
+
+      // 預覽元素只加入一次
+      right.appendChild(el('div', 'workflow-section-title', '輸出摘要'));
+      right.appendChild(summary);
+      right.appendChild(preview);
 
       pageSizeSelect.addEventListener('change', () => { void updateSummary(); });
       dpiSelect.addEventListener('change', () => { void updateSummary(); });
@@ -3241,13 +3369,24 @@ async function handleAction({ action, value, page, files, source, fromPage, from
   switch (action) {
     // --- File ---
     case 'open':
-      openFileDialog().then(f => {
-        if (!f) return;
-        const isImage = isImageLikeFile(f);
-        if (isImage) {
-          imagesToPdfAndOpen([f]);
-        } else {
-          documentEngine.openFile(f);
+      openFileDialog().then(files => {
+        if (!files?.length) return;
+        const pdfFiles = files.filter(f => !isImageLikeFile(f));
+        const imageFiles = files.filter(f => isImageLikeFile(f));
+
+        if (imageFiles.length > 0 && pdfFiles.length === 0) {
+          // All images: convert to PDF and open
+          imagesToPdfAndOpen(imageFiles);
+        } else if (pdfFiles.length > 0 && imageFiles.length === 0) {
+          // All PDFs: open first one, merge rest if multiple
+          documentEngine.openFile(pdfFiles[0]);
+          if (pdfFiles.length > 1) {
+            appRenderer.toast(`已開啟 ${pdfFiles[0].name}。其餘 ${pdfFiles.length - 1} 份 PDF 可使用「合併」功能。`, 'info', 5000);
+          }
+        } else if (pdfFiles.length > 0 && imageFiles.length > 0) {
+          // Mixed: open PDF, images can be added later
+          documentEngine.openFile(pdfFiles[0]);
+          appRenderer.toast(`已開啟 ${pdfFiles[0].name}。${imageFiles.length} 張圖片可使用「圖片轉 PDF」後合併。`, 'info', 5000);
         }
       });
       break;
@@ -3709,6 +3848,10 @@ async function handleAction({ action, value, page, files, source, fromPage, from
           mutate: () => documentEngine.reorderPages(pages, targetPage),
           successMessage: `已將 ${pages.length} 頁移動到第 ${targetPage} 頁之後`,
         });
+        // 導航到移動後的頁面（目標位置之後的第一頁）
+        const newFirstPage = Math.min(targetPage + 1, state.pageCount);
+        stateManager.patch({ currentPage: newFirstPage, selectedPageNumbers: [newFirstPage] });
+        eventBus.emit('page:navigate', { targetPage: newFirstPage });
       } catch (err) {
         appRenderer.toast(`批量移動頁面失敗：${err.message}`, 'error');
       }
@@ -3739,6 +3882,38 @@ async function handleAction({ action, value, page, files, source, fromPage, from
     case 'convert-office':
       await exportCurrentDocumentToOffice(state);
       break;
+    case 'export-as-image': {
+      if (state.documentStatus !== 'ready') break;
+      const opts = await openExportImageDialog(state);
+      if (!opts) break;
+      const { format, dpi, quality, pages } = opts;
+      const baseName = (documentEngine.fileName ?? 'document').replace(/\.[^.]+$/, '');
+      const scale = dpi / 72;
+      const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+      appRenderer.toast(`正在匯出 ${pages.length} 張${format.toUpperCase()}圖片…`, 'info', 15000);
+      for (let i = 0; i < pages.length; i++) {
+        const pNum = pages[i];
+        try {
+          const pdfPage = await documentEngine.getPage(pNum);
+          const vp = pdfPage.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(vp.width);
+          canvas.height = Math.round(vp.height);
+          await pdfPage.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+          const name = `${baseName}_p${String(pNum).padStart(3, '0')}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+          await new Promise((resolve) => {
+            canvas.toBlob(async (blob) => {
+              await saveBlobToFile(blob, name);
+              resolve();
+            }, mimeType, format === 'jpeg' ? quality : undefined);
+          });
+        } catch (err) {
+          console.warn(`[Export Image] Failed to export page ${pNum}:`, err);
+        }
+      }
+      appRenderer.toast(`已匯出 ${pages.length} 張${format.toUpperCase()}圖片`, 'success');
+      break;
+    }
     case 'protect-pdf':
       await saveAs({
         enableProtection: true,
@@ -3800,17 +3975,20 @@ async function handleAction({ action, value, page, files, source, fromPage, from
       const baseName = (documentEngine.fileName ?? 'document').replace(/\.pdf$/i, '');
       const splitOpts = await openSplitDialog(stateManager.state.pageCount, baseName);
       if (!splitOpts) break;
-      const { ranges: splitRanges, prefix: splitPrefix, outputMode: splitOutputMode } = splitOpts;
+      const { ranges: splitRanges, prefix: splitPrefix, outputMode: splitOutputMode, customNames = [] } = splitOpts;
       appRenderer.toast('正在拆分 PDF…', 'info', 10000);
       documentEngine.splitToRanges(splitRanges).then(async results => {
         if (results.length === 0) { appRenderer.toast('沒有可輸出的拆分結果', 'error'); return; }
-        // Apply user-specified prefix to filenames
-        const named = results.map((r, i) => ({
-          bytes: r.bytes,
-          name: results.length === 1
-            ? `${splitPrefix}.pdf`
-            : `${splitPrefix}_part${String(i + 1).padStart(2, '0')}.pdf`,
-        }));
+        // Apply user-specified prefix and custom names to filenames
+        const named = results.map((r, i) => {
+          const customName = (customNames[i] || '').trim();
+          return {
+            bytes: r.bytes,
+            name: customName || (results.length === 1
+              ? `${splitPrefix}.pdf`
+              : `${splitPrefix}_part${String(i + 1).padStart(2, '0')}.pdf`),
+          };
+        });
         const useZip = splitOutputMode === 'zip' || named.length > 5;
         if (useZip) {
           const zipFiles = {};
@@ -4009,6 +4187,7 @@ annotationLayer.init(canvasLayer, documentEngine);
       const entry = { ...pendingSignatureInfo, pageNumber };
       signatureManifest.push(entry);
       pendingSignatureInfo = null;
+      stateManager.patch({ selectedTool: 'select' });
       try { documentEngine.embedSignatureMetadata(signatureManifest); } catch { /* non-critical */ }
       renderSignedStatusBadge();
     }
