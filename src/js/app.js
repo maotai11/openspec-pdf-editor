@@ -33,10 +33,15 @@ import { embedImageFile, isImageLikeFile, readImageDimensions } from './core/Ima
 import { resolveImageDrawLayout, resolveMarginPt, resolveTargetPageSize } from './core/ImagePdfLayout.js';
 import { getDisplayPageSize, normalizeRotation, screenRectToPdfRect } from './core/PageGeometry.js';
 import { exportPdfToDocx, exportPdfToPptx, exportPdfToXlsx } from './core/OfficeExport.js';
+import { planOpenFiles } from './core/OpenFilePlan.js';
 import { protectPdfBytes } from './core/PdfProtection.js';
+import { resolveDialogSubmission } from './core/WorkflowDialog.js';
 import { buildTypedSignaturePreset } from './core/SignatureAsset.js';
+import { resolveSignaturePreviewDataUrl } from './core/SignaturePreview.js';
+import { createFileScopedValueCache, createLatestAsyncRunner } from './core/WorkflowAsync.js';
 import { resolveThumbnailViewport } from './core/ThumbnailLayout.js';
 import { sessionDB }      from './core/SessionDB.js';
+import { flushPendingTextCommits } from './core/TextFieldCommit.js';
 import { keyMap }         from './core/KeyMap.js';
 import { canvasLayer }    from './ui/CanvasLayer.js';
 import { annotationLayer }from './ui/AnnotationLayer.js';
@@ -246,6 +251,26 @@ function fitWorkflowPreviewBox(node, displayWidthPt, displayHeightPt, { maxWidth
   node.style.maxWidth = '100%';
 }
 
+function persistCurrentSession({ immediate = false } = {}) {
+  flushPendingTextCommits();
+  const state = stateManager.state;
+  if (state.documentStatus !== 'ready' || !documentEngine.fileHash) return;
+
+  const snapshot = {
+    annotations: annotationLayer.getAllAnnotations(),
+    lastPage: state.currentPage,
+    lastZoom: state.zoom,
+    fileName: documentEngine.fileName,
+  };
+
+  if (immediate) {
+    void sessionDB.saveNow(documentEngine.fileHash, snapshot);
+    return;
+  }
+
+  sessionDB.save(documentEngine.fileHash, snapshot);
+}
+
 function applyWorkflowPreviewAspect(node, metrics) {
   node.style.aspectRatio = `${metrics.displayWidthPt} / ${metrics.displayHeightPt}`;
   fitWorkflowPreviewBox(node, metrics.displayWidthPt, metrics.displayHeightPt);
@@ -304,11 +329,16 @@ function attachPreviewZoom(node) {
       return;
     }
     const closeBtn = el('button', 'preview-zoom-close', '✕');
-    closeBtn.addEventListener('click', () => overlay.remove());
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    document.addEventListener('keydown', function esc(e) {
-      if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
-    });
+    const cleanup = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onEscape);
+    };
+    const onEscape = (e) => {
+      if (e.key === 'Escape') cleanup();
+    };
+    closeBtn.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    document.addEventListener('keydown', onEscape);
     overlay.appendChild(img);
     overlay.appendChild(closeBtn);
     document.body.appendChild(overlay);
@@ -440,31 +470,60 @@ function showWorkflowDialog({ title, description = '', submitLabel = '套用', s
   submitBtn.className = submitClassName;
   setDialogError('');
 
+  // 設置 aria-describedby
+  modal.setAttribute('aria-describedby', 'workflow-modal-description');
+
   const controller = buildContent(bodyEl) ?? {};
 
   return new Promise((resolve) => {
+    let submitting = false;
+    // 記錄打開前的 focus 元素
+    const previousFocus = document.activeElement;
+
     const close = (result) => {
       modal.classList.add('hidden');
       modal.removeEventListener('click', onBackdropClick);
       cancelBtn.removeEventListener('click', onCancel);
       submitBtn.removeEventListener('click', onSubmit);
       document.removeEventListener('keydown', onKeydown, true);
+      document.removeEventListener('keydown', onFocusTrap, true);
       controller.dispose?.();
       bodyEl.innerHTML = '';
       setDialogError('');
       eventBus.emit('modal:close');
+      // 恢復 focus
+      if (previousFocus && previousFocus.focus) {
+        previousFocus.focus();
+      }
       resolve(result);
     };
 
     const onCancel = () => close(null);
-    const onSubmit = () => {
-      const value = controller.getValue?.();
-      const validationError = controller.validate?.(value);
-      if (validationError) {
-        setDialogError(validationError);
+    const onSubmit = async () => {
+      if (submitting) return;
+      submitting = true;
+      submitBtn.disabled = true;
+      cancelBtn.disabled = true;
+
+      let submission;
+      try {
+        submission = await resolveDialogSubmission(controller);
+      } catch (error) {
+        setDialogError(error?.message ?? '處理表單時發生錯誤。');
+        submitting = false;
+        submitBtn.disabled = false;
+        cancelBtn.disabled = false;
         return;
       }
-      close(value);
+
+      if (submission.validationError) {
+        setDialogError(submission.validationError);
+        submitting = false;
+        submitBtn.disabled = false;
+        cancelBtn.disabled = false;
+        return;
+      }
+      close(submission.value);
     };
     const onKeydown = (event) => {
       if (event.key === 'Escape') {
@@ -472,13 +531,39 @@ function showWorkflowDialog({ title, description = '', submitLabel = '套用', s
         close(null);
       }
     };
+
+    // Focus Trap: 防止 Tab 逃逸
+    const onFocusTrap = (event) => {
+      if (event.key !== 'Tab') return;
+      const focusable = modal.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey) {
+        if (document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
     const onBackdropClick = (event) => {
       if (event.target === modal) close(null);
     };
 
+    cancelBtn.disabled = false;
+    submitBtn.disabled = false;
     cancelBtn.addEventListener('click', onCancel);
     submitBtn.addEventListener('click', onSubmit);
     document.addEventListener('keydown', onKeydown, true);
+    document.addEventListener('keydown', onFocusTrap, true);
     modal.addEventListener('click', onBackdropClick);
     modal.classList.remove('hidden');
     eventBus.emit('modal:open');
@@ -534,6 +619,13 @@ function summarizePages(pages = []) {
 
   segments.push(start === previous ? `${start}` : `${start}-${previous}`);
   return `第 ${segments.join(', ')} 頁`;
+}
+
+function normalizePageNumberList(pageNumbers = [], pageCount = 0) {
+  return [...new Set((pageNumbers ?? [])
+    .map((pageNumber) => Math.trunc(Number(pageNumber)))
+    .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount))]
+    .sort((left, right) => left - right);
 }
 
 function buildPageScopeControls(pageCount, currentPage, defaults) {
@@ -1048,6 +1140,8 @@ async function openWatermarkDialog(state) {
       let selectedImageFile = null;
       let selectedImageUrl = '';
       let selectedImageDimensions = { width: 1, height: 1 };
+      const imageDimensionsCache = createFileScopedValueCache();
+      const runLatestImagePreview = createLatestAsyncRunner();
 
       const updatePreview = async () => {
         const sourceType = sourceSelect.value;
@@ -1074,7 +1168,13 @@ async function openWatermarkDialog(state) {
             extraTransform: `rotate(${rotationInput.value}deg)`,
           });
         } else if (selectedImageFile) {
-          selectedImageDimensions = await readImageDimensions(selectedImageFile);
+          const activeFile = selectedImageFile;
+          const result = await runLatestImagePreview(async () => ({
+            file: activeFile,
+            dimensions: await imageDimensionsCache.get(activeFile, readImageDimensions),
+          }));
+          if (result.stale || result.value.file !== selectedImageFile) return;
+          selectedImageDimensions = result.value.dimensions;
           const imageLayout = resolveImageWatermarkLayout({
             pageWidth: previewWidth,
             pageHeight: previewHeight,
@@ -1189,7 +1289,10 @@ async function openWatermarkDialog(state) {
       scopeControls.fromInput.addEventListener('input', () => { void updatePreview(); });
       scopeControls.toInput.addEventListener('input', () => { void updatePreview(); });
       scopeControls.pagesInput.addEventListener('input', () => { void updatePreview(); });
-      imagePickerBtn.addEventListener('click', () => imageInput.click());
+      imagePickerBtn.addEventListener('click', () => {
+        imageInput.value = '';
+        imageInput.click();
+      });
       imageInput.addEventListener('change', async () => {
         selectedImageFile = imageInput.files?.[0] ?? null;
         imageStatus.textContent = selectedImageFile ? selectedImageFile.name : '尚未選擇圖片';
@@ -1809,7 +1912,7 @@ function openOfficeExportDialog(state) {
         notes.appendChild(el('p', 'workflow-help', `輸出檔名：${fileNameInput.value}`));
         if (format === 'docx') notes.appendChild(el('p', 'workflow-help', 'Word 會保留頁面影像，並把可擷取文字附在各頁下方。'));
         if (format === 'pptx') notes.appendChild(el('p', 'workflow-help', 'PowerPoint 會將每一頁放成一張投影片。'));
-        if (format === 'xlsx') notes.appendChild(el('p', 'workflow-help', 'Excel 會把每頁文字擷取結果拆成工作表。'));
+        if (format === 'xlsx') notes.appendChild(el('p', 'workflow-help', 'Excel 會把每頁拆成工作表，並附帶列印頁碼標籤與頁面預覽。'));
       };
 
       left.appendChild(el('div', 'workflow-section-title', '轉換設定'));
@@ -1877,6 +1980,8 @@ async function exportCurrentDocumentToOffice(state) {
     } else if (settings.format === 'xlsx') {
       blob = await exportPdfToXlsx(documentEngine, {
         pageNumbers: settings.pages,
+        title: documentEngine.fileName ?? 'OpenSpec Export',
+        includePageImages: settings.includePageImages,
       });
     } else {
       blob = await exportPdfToDocx(documentEngine, {
@@ -2323,12 +2428,15 @@ async function openSignatureDialog() {
 
       const imageButton = el('button', 'btn', '選擇簽名圖片');
       imageButton.type = 'button';
-      imageButton.addEventListener('click', () => imageInput.click());
+      imageButton.addEventListener('click', () => {
+        imageInput.value = '';
+        imageInput.click();
+      });
       imageInput.addEventListener('change', async () => {
         const file = imageInput.files?.[0];
         if (!file) return;
         signatureImageDataUrl = await fileToDataUrl(file);
-        syncPreview();
+        void syncPreview();
       });
 
       const modeGroups = {
@@ -2417,26 +2525,43 @@ async function openSignatureDialog() {
         });
       };
 
-      const syncPreview = () => {
+      const resolveBackgroundOption = (mode) =>
+        (mode === 'drawn' && removeBgInput.checked) ||
+        (mode === 'image' && removeBgImageInput.checked);
+
+      let previewGeneration = 0;
+      const syncPreview = async () => {
         updateMode();
         const preset = buildPreset();
-        preview.innerHTML = '';
-        const image = document.createElement('img');
-        image.className = 'workflow-preview-watermark-image';
-        image.alt = '電子簽署預覽';
-        image.src = preset.dataUrl || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
-        image.style.maxWidth = '100%';
-        image.style.maxHeight = '220px';
-        image.style.objectFit = 'contain';
-        preview.appendChild(image);
-      };
+        const generation = ++previewGeneration;
+        let previewDataUrl = String(preset.dataUrl ?? '').trim();
+        try {
+          previewDataUrl = await resolveSignaturePreviewDataUrl({
+            mode: preset.mode,
+            dataUrl: previewDataUrl,
+            removeBackground: resolveBackgroundOption(preset.mode),
+            removeWhiteBackground: removeWhiteBg,
+          });
+        } catch (error) {
+          console.warn('[OpenSpec] Signature preview background removal failed:', error);
+        }
+        if (generation !== previewGeneration) return;
 
-      modeSelect.addEventListener('change', syncPreview);
-      signerInput.addEventListener('input', syncPreview);
-      subtitleInput.addEventListener('input', syncPreview);
-      includeDateInput.addEventListener('change', syncPreview);
-      dateInput.addEventListener('input', syncPreview);
-      drawCanvas.addEventListener('pointerup', syncPreview);
+        preview.innerHTML = '';
+        sigOverlayImg.src = previewDataUrl;
+        sigOverlayImg.style.display = previewDataUrl ? '' : 'none';
+
+        if (previewDataUrl) {
+          const image = document.createElement('img');
+          image.className = 'workflow-preview-watermark-image';
+          image.alt = '電子簽署預覽';
+          image.src = previewDataUrl;
+          image.style.maxWidth = '100%';
+          image.style.maxHeight = '220px';
+          image.style.objectFit = 'contain';
+          preview.appendChild(image);
+        }
+      };
 
       // ---- 簽署資訊欄位（事由、地點、職稱）----
       const sigTitleInput = document.createElement('input');
@@ -2531,42 +2656,16 @@ async function openSignatureDialog() {
       layout.appendChild(right);
       body.appendChild(layout);
 
-      // 更新 syncPreview：同時更新右側 overlay
-      const origSyncPreview = syncPreview;
-      const enhancedSyncPreview = () => {
-        updateMode();
-        const preset = buildPreset();
-        // 舊版 preview div 不再使用，改用 sigOverlayImg
-        sigOverlayImg.src = preset.dataUrl || '';
-        sigOverlayImg.style.display = preset.dataUrl ? '' : 'none';
-        // 也更新舊 preview 供參考
-        preview.innerHTML = '';
-        if (preset.dataUrl) {
-          const img = document.createElement('img');
-          img.src = preset.dataUrl;
-          img.style.cssText = 'max-width:100%;max-height:120px;object-fit:contain;';
-          preview.appendChild(img);
-        }
-      };
+      modeSelect.addEventListener('change', () => { void syncPreview(); });
+      signerInput.addEventListener('input', () => { void syncPreview(); });
+      subtitleInput.addEventListener('input', () => { void syncPreview(); });
+      includeDateInput.addEventListener('change', () => { void syncPreview(); });
+      dateInput.addEventListener('input', () => { void syncPreview(); });
+      drawCanvas.addEventListener('pointerup', () => { void syncPreview(); });
+      removeBgInput.addEventListener('change', () => { void syncPreview(); });
+      removeBgImageInput.addEventListener('change', () => { void syncPreview(); });
 
-      // 覆蓋所有監聽器
-      modeSelect.removeEventListener('change', syncPreview);
-      signerInput.removeEventListener('input', syncPreview);
-      subtitleInput.removeEventListener('input', syncPreview);
-      includeDateInput.removeEventListener('change', syncPreview);
-      dateInput.removeEventListener('input', syncPreview);
-      drawCanvas.removeEventListener('pointerup', syncPreview);
-
-      modeSelect.addEventListener('change', enhancedSyncPreview);
-      signerInput.addEventListener('input', enhancedSyncPreview);
-      subtitleInput.addEventListener('input', enhancedSyncPreview);
-      includeDateInput.addEventListener('change', enhancedSyncPreview);
-      dateInput.addEventListener('input', enhancedSyncPreview);
-      drawCanvas.addEventListener('pointerup', enhancedSyncPreview);
-      removeBgInput.addEventListener('change', enhancedSyncPreview);
-      removeBgImageInput.addEventListener('change', enhancedSyncPreview);
-
-      enhancedSyncPreview();
+      void syncPreview();
 
       return {
         focus() { signerInput.focus(); signerInput.select(); },
@@ -2576,9 +2675,12 @@ async function openSignatureDialog() {
           const shouldRemoveBg =
             (modeSelect.value === 'drawn' && removeBgInput.checked) ||
             (modeSelect.value === 'image' && removeBgImageInput.checked);
-          if (shouldRemoveBg && preset.dataUrl && preset.mode !== 'typed') {
-            preset.dataUrl = await removeWhiteBg(preset.dataUrl);
-          }
+          preset.dataUrl = await resolveSignaturePreviewDataUrl({
+            mode: preset.mode,
+            dataUrl: preset.dataUrl,
+            removeBackground: shouldRemoveBg,
+            removeWhiteBackground: removeWhiteBg,
+          });
           preset.sigTitle    = sigTitleInput.value.trim();
           preset.sigReason   = sigReasonInput.value.trim();
           preset.sigLocation = sigLocationInput.value.trim();
@@ -2748,13 +2850,18 @@ async function openImageDialog(allowMultiple = true) {
 
 async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
   const orderedFiles = [...files];
-  const dimensionsCache = new Map();
+  const dimensionsCache = createFileScopedValueCache();
+  const previewUrlCache = new Map();
 
   const ensureDimensions = async (file) => {
-    if (!dimensionsCache.has(file.name)) {
-      dimensionsCache.set(file.name, await readImageDimensions(file));
+    return dimensionsCache.get(file, readImageDimensions);
+  };
+
+  const ensurePreviewUrl = (file) => {
+    if (!previewUrlCache.has(file)) {
+      previewUrlCache.set(file, URL.createObjectURL(file));
     }
-    return dimensionsCache.get(file.name);
+    return previewUrlCache.get(file);
   };
 
   return showWorkflowDialog({
@@ -2813,12 +2920,22 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
       // 建立預覽元素一次，updateSummary 只更新內容
       const preview = el('div', 'workflow-preview-page');
       const previewCard = el('div', 'workflow-crop-preview');
+      const previewImage = document.createElement('img');
+      previewImage.className = 'workflow-preview-surface';
+      previewImage.alt = '圖片頁面預覽';
+      previewCard.appendChild(previewImage);
       preview.appendChild(previewCard);
+      const runLatestPreviewSummary = createLatestAsyncRunner();
 
       const updateSummary = async () => {
         customMarginInput.disabled = marginSelect.value !== 'custom';
         const firstFile = orderedFiles[0];
-        const dims = firstFile ? await ensureDimensions(firstFile) : { width: 1200, height: 800 };
+        const result = await runLatestPreviewSummary(async () => ({
+          file: firstFile,
+          dims: firstFile ? await ensureDimensions(firstFile) : { width: 1200, height: 800 },
+        }));
+        if (result.stale || result.value.file !== orderedFiles[0]) return;
+        const { dims } = result.value;
         const marginPt = resolveMarginPt({
           preset: marginSelect.value,
           customMm: Number(customMarginInput.value) || 0,
@@ -2856,6 +2973,12 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
         previewCard.style.border = '2px solid var(--color-accent)';
         previewCard.style.background = 'oklch(95% 0.02 250 / 0.3)';
         previewCard.style.borderRadius = 'var(--radius-sm)';
+        previewCard.style.overflow = 'hidden';
+        previewImage.style.width = '100%';
+        previewImage.style.height = '100%';
+        previewImage.style.objectFit = 'contain';
+        previewImage.style.display = firstFile ? 'block' : 'none';
+        previewImage.src = firstFile ? ensurePreviewUrl(firstFile) : '';
       };
 
       left.appendChild(el('div', 'workflow-section-title', '版面設定'));
@@ -2884,6 +3007,11 @@ async function openImageToPdfDialog(files, { openAfterConvert = false } = {}) {
 
       return {
         focus() { pageSizeSelect.focus(); },
+        dispose() {
+          for (const url of previewUrlCache.values()) {
+            URL.revokeObjectURL(url);
+          }
+        },
         getValue() {
           return {
             files: [...orderedFiles],
@@ -3123,10 +3251,13 @@ function cleanupThumbnailDragState() {
  * Returns target page number (integer, insert after) or null if cancelled.
  */
 async function openBatchMoveDialog(selectedPages, pageCount) {
+  const safeSelectedPages = normalizePageNumberList(selectedPages, pageCount);
+  if (safeSelectedPages.length === 0) return null;
+
   // 預先渲染選取頁面的縮圖
   const thumbSize = 80;
   const thumbDataUrls = {};
-  await Promise.all(selectedPages.slice(0, 12).map(async (pNum) => {
+  await Promise.all(safeSelectedPages.slice(0, 12).map(async (pNum) => {
     try {
       const pdfPage = await documentEngine.getPage(pNum);
       const vp = pdfPage.getViewport({ scale: thumbSize / pdfPage.getViewport({ scale: 1 }).width });
@@ -3139,7 +3270,7 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
 
   return showWorkflowDialog({
     title: '批量移動頁面',
-    description: `已選取 ${selectedPages.length} 頁，請指定插入目標位置。`,
+    description: `已選取 ${safeSelectedPages.length} 頁，請指定插入目標位置。`,
     submitLabel: '移動',
     buildContent(body) {
       const layout = el('div', 'workflow-grid');
@@ -3166,19 +3297,24 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
       targetCanvas.style.maxWidth = '100%';
       targetThumbWrap.appendChild(targetLabel);
       targetThumbWrap.appendChild(targetCanvas);
+      attachPreviewZoom(targetCanvas);
 
+      let previewGeneration = 0;
       targetInput.addEventListener('input', async () => {
+        const generation = ++previewGeneration;
         const v = parseInt(targetInput.value, 10);
         if (isNaN(v) || v < 0 || v > pageCount) return;
         const showPage = v === 0 ? 1 : Math.min(v, pageCount);
         try {
           const pdfPage = await documentEngine.getPage(showPage);
           const vp2 = pdfPage.getViewport({ scale: 120 / pdfPage.getViewport({ scale: 1 }).width });
+          if (generation !== previewGeneration) return;
           targetCanvas.width = Math.round(vp2.width);
           targetCanvas.height = Math.round(vp2.height);
           targetCanvas.style.width = `${Math.round(vp2.width)}px`;
           targetCanvas.style.height = `${Math.round(vp2.height)}px`;
           await pdfPage.render({ canvasContext: targetCanvas.getContext('2d'), viewport: vp2 }).promise;
+          if (generation !== previewGeneration) return;
           targetLabel.textContent = v === 0 ? '↓ 插入到第 1 頁之前' : `↓ 插入到第 ${v} 頁之後`;
         } catch { /* skip */ }
       });
@@ -3190,22 +3326,23 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
       left.appendChild(targetThumbWrap);
 
       // 右側：選取頁面縮圖
-      right.appendChild(el('div', 'workflow-section-title', `已選取的頁面（${selectedPages.length} 頁）`));
+      right.appendChild(el('div', 'workflow-section-title', `已選取的頁面（${safeSelectedPages.length} 頁）`));
       const thumbGrid = el('div', 'batch-move-thumb-grid');
-      selectedPages.slice(0, 12).forEach((pNum) => {
+      safeSelectedPages.slice(0, 12).forEach((pNum) => {
         const item = el('div', 'batch-move-thumb-item');
         if (thumbDataUrls[pNum]) {
           const img = document.createElement('img');
           img.src = thumbDataUrls[pNum];
           img.style.cssText = 'max-width:100%;border:1px solid var(--color-border);border-radius:3px;';
+          attachPreviewZoom(img);
           item.appendChild(img);
         }
         item.appendChild(el('div', 'batch-move-thumb-label', `第 ${pNum} 頁`));
         thumbGrid.appendChild(item);
       });
-      if (selectedPages.length > 12) {
+      if (safeSelectedPages.length > 12) {
         thumbGrid.appendChild(el('div', 'batch-move-thumb-item batch-move-thumb-more',
-          `…還有 ${selectedPages.length - 12} 頁`));
+          `…還有 ${safeSelectedPages.length - 12} 頁`));
       }
       right.appendChild(thumbGrid);
 
@@ -3218,7 +3355,8 @@ async function openBatchMoveDialog(selectedPages, pageCount) {
         getValue() { return Number(targetInput.value); },
         validate(v) {
           if (isNaN(v) || v < 0 || v > pageCount) return `請輸入 0 到 ${pageCount} 之間的整數。`;
-          if (selectedPages.includes(v)) return `目標頁 ${v} 本身在選取範圍內，請選擇其他位置。`;
+          if (safeSelectedPages.length >= pageCount) return '目前已選取全部頁面，沒有可移動的目標位置。';
+          if (safeSelectedPages.includes(v)) return `目標頁 ${v} 本身在選取範圍內，請選擇其他位置。`;
           return '';
         },
       };
@@ -3418,43 +3556,64 @@ function resolveThumbnailSelection(pageNumber, state, modifiers = {}) {
   return [pageNumber];
 }
 
+async function openSelectedPdfFiles(pdfFiles, { skippedImageCount = 0 } = {}) {
+  if (!pdfFiles.length) return;
+
+  if (pdfFiles.length === 1) {
+    await documentEngine.openFile(pdfFiles[0]);
+    if (skippedImageCount > 0) {
+      appRenderer.toast(`已開啟 ${pdfFiles[0].name}。${skippedImageCount} 張圖片可使用「圖片轉 PDF」後再加入。`, 'info', 5000);
+    }
+    return;
+  }
+
+  appRenderer.toast(`正在批量匯入 ${pdfFiles.length} 份 PDF…`, 'info', 8000);
+  const opened = await documentEngine.openMergedFiles(pdfFiles);
+  if (!opened) return;
+  appRenderer.toast(
+    skippedImageCount > 0
+      ? `已匯入並合併 ${pdfFiles.length} 份 PDF。另有 ${skippedImageCount} 張圖片可稍後轉成 PDF 再加入。`
+      : `已匯入並合併 ${pdfFiles.length} 份 PDF。`,
+    'success',
+    5000,
+  );
+}
+
 // ---- UI Action Router ----
-async function handleAction({ action, value, page, files, source, fromPage, fromPages, toPage, patch }) {
+async function handleAction({ action, value, page, files, source, fromPage, fromPages, toPage, patch, annotationId }) {
   const state = stateManager.state;
 
   switch (action) {
     // --- File ---
     case 'open':
-      openFileDialog().then(files => {
+      openFileDialog().then(async (files) => {
         if (!files?.length) return;
-        const pdfFiles = files.filter(f => !isImageLikeFile(f));
-        const imageFiles = files.filter(f => isImageLikeFile(f));
+        const plan = planOpenFiles(files, { isImageFile: isImageLikeFile });
 
-        if (imageFiles.length > 0 && pdfFiles.length === 0) {
-          // All images: convert to PDF and open
-          imagesToPdfAndOpen(imageFiles);
-        } else if (pdfFiles.length > 0 && imageFiles.length === 0) {
-          // All PDFs: open first one, merge rest if multiple
-          documentEngine.openFile(pdfFiles[0]);
-          if (pdfFiles.length > 1) {
-            appRenderer.toast(`已開啟 ${pdfFiles[0].name}。其餘 ${pdfFiles.length - 1} 份 PDF 可使用「合併」功能。`, 'info', 5000);
-          }
-        } else if (pdfFiles.length > 0 && imageFiles.length > 0) {
-          // Mixed: open PDF, images can be added later
-          documentEngine.openFile(pdfFiles[0]);
-          appRenderer.toast(`已開啟 ${pdfFiles[0].name}。${imageFiles.length} 張圖片可使用「圖片轉 PDF」後合併。`, 'info', 5000);
+        if (plan.mode === 'images-only') {
+          imagesToPdfAndOpen(plan.imageFiles);
+          return;
+        }
+
+        if (plan.mode === 'single-pdf' || plan.mode === 'multi-pdf') {
+          await openSelectedPdfFiles(plan.pdfFiles);
+          return;
+        }
+
+        if (plan.mode === 'mixed') {
+          await openSelectedPdfFiles(plan.pdfFiles, { skippedImageCount: plan.imageFiles.length });
         }
       });
       break;
     case 'open-files': {
       if (!files?.length) break;
-      const f = files[0];
-      const isImg = isImageLikeFile(f);
-      if (isImg) {
-        const imgFiles = files.filter((x) => isImageLikeFile(x));
-        imagesToPdfAndOpen(imgFiles);
-      } else {
-        documentEngine.openFile(f);
+      const plan = planOpenFiles(files, { isImageFile: isImageLikeFile });
+      if (plan.mode === 'images-only') {
+        imagesToPdfAndOpen(plan.imageFiles);
+      } else if (plan.mode === 'single-pdf' || plan.mode === 'multi-pdf') {
+        await openSelectedPdfFiles(plan.pdfFiles);
+      } else if (plan.mode === 'mixed') {
+        await openSelectedPdfFiles(plan.pdfFiles, { skippedImageCount: plan.imageFiles.length });
       }
       break;
     }
@@ -3887,10 +4046,14 @@ async function handleAction({ action, value, page, files, source, fromPage, from
       break;
 
     case 'batch-move-pages': {
-      const pages = Array.isArray(fromPages) ? fromPages
+      const pages = normalizePageNumberList(Array.isArray(fromPages) ? fromPages
         : Array.isArray(value?.fromPages) ? value.fromPages
-        : (stateManager.state.selectedPageNumbers ?? []);
+        : (stateManager.state.selectedPageNumbers ?? []), state.pageCount);
       if (pages.length === 0) break;
+      if (pages.length >= state.pageCount) {
+        appRenderer.toast('目前已選取全部頁面，沒有可移動的目標位置', 'error');
+        break;
+      }
 
       // toPage may come from drag-drop directly or must be asked
       let targetPage = typeof toPage === 'number' ? toPage : null;
@@ -3925,7 +4088,7 @@ async function handleAction({ action, value, page, files, source, fromPage, from
       break;
     }
     case 'update-selected-annotation': {
-      const id = state.selectedAnnotationIds[0];
+      const id = annotationId ?? state.selectedAnnotationIds[0];
       if (!id || !patch) break;
       annotationLayer.updateAnnotation(id, patch);
       break;
@@ -4242,12 +4405,7 @@ annotationLayer.init(canvasLayer, documentEngine);
     const { documentStatus, currentPage, zoom } = stateManager.state;
     if (documentStatus !== 'ready') return;
     appRenderer.setSaveStatus('saving');
-    sessionDB.save(documentEngine.fileHash, {
-      annotations: annotationLayer.getAllAnnotations(),
-      lastPage: currentPage,
-      lastZoom: zoom,
-      fileName: documentEngine.fileName,
-    });
+    persistCurrentSession();
     clearTimeout(saveStatusTimer);
     saveStatusTimer = setTimeout(() => appRenderer.setSaveStatus('saved'), SAVE_STATUS_DISPLAY_MS);
   });
@@ -4294,14 +4452,14 @@ annotationLayer.init(canvasLayer, documentEngine);
 
   // Save on page unload
   window.addEventListener('beforeunload', () => {
-    const state = stateManager.state;
-    if (state.documentStatus === 'ready' && documentEngine.fileHash) {
-      sessionDB.saveNow(documentEngine.fileHash, {
-        annotations: annotationLayer.getAllAnnotations(),
-        lastPage: state.currentPage,
-        lastZoom: state.zoom,
-        fileName: documentEngine.fileName,
-      });
+    persistCurrentSession({ immediate: true });
+  });
+  window.addEventListener('pagehide', () => {
+    persistCurrentSession({ immediate: true });
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      persistCurrentSession({ immediate: true });
     }
   });
 
@@ -4356,4 +4514,3 @@ main().catch(err => {
     document.getElementById('app').style.display = 'none';
   }
 });
-

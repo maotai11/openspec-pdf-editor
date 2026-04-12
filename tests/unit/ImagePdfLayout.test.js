@@ -32,6 +32,18 @@ describe('ImagePdfLayout', () => {
     assert.ok(Math.abs(page.height - (360 + 36)) < 0.001);
   });
 
+  it('rotates fit-page output to landscape for wide images', () => {
+    const page = resolveTargetPageSize({
+      pageSize: 'fit-page',
+      imageWidthPx: 2400,
+      imageHeightPx: 1200,
+      dpi: 150,
+      marginPt: 0,
+    });
+
+    assert.ok(page.width > page.height);
+  });
+
   it('fits images inside target pages without exceeding margins', () => {
     const draw = resolveImageDrawLayout({
       pageWidthPt: 595.28,

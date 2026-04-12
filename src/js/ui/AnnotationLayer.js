@@ -20,6 +20,9 @@ import {
   screenRectToPdfRect,
 } from '../core/PageGeometry.js';
 import { buildSignatureAnnotationContent, buildTypedSignaturePreset } from '../core/SignatureAsset.js';
+import { remapAnnotationsForStructureChange } from '../core/AnnotationPageMap.js';
+import { bindBufferedTextCommit } from '../core/TextFieldCommit.js';
+import { normalizeMultilineText, splitPreservedLines } from '../core/MultilineText.js';
 import { resolveTextMarkupSelection } from '../core/TextMarkup.js';
 
 function uuid() {
@@ -259,8 +262,9 @@ export class AnnotationLayer {
 
   #buildSVG() {
     this.#svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    this.#svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;cursor:crosshair;';
-    this.#svg.setAttribute('aria-hidden', 'true');
+    this.#svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;';
+    this.#svg.setAttribute('role', 'img');
+    this.#svg.setAttribute('aria-label', 'PDF 標注層');
     this.#root.appendChild(this.#svg);
   }
 
@@ -652,18 +656,26 @@ export class AnnotationLayer {
     textarea.select();
 
     let closed = false;
+    let textCommitBinding = null;
     const close = () => {
       if (closed) return;
       closed = true;
+      textCommitBinding?.cleanup({ cancelPending: true });
       editor.remove();
     };
-    const commit = () => {
-      const value = textarea.value;
+    const applyValue = (value) => {
       close();
       if (value !== annotation.content) {
         this.updateAnnotation(annotation.id, { content: value });
       }
     };
+    const commit = () => applyValue(textarea.value);
+
+    textCommitBinding = bindBufferedTextCommit(textarea, {
+      documentTarget: document,
+      isInsideTarget: (target) => target === editor || Boolean(editor.contains?.(target)),
+      onCommit: (value) => applyValue(value),
+    });
 
     saveButton.addEventListener('click', commit);
     cancelButton.addEventListener('click', close);
@@ -1505,7 +1517,8 @@ export class AnnotationLayer {
     group.appendChild(divider);
 
     const lines = String(annotation.content ?? '電子印章').split(/\r?\n/).filter(Boolean).slice(0, 2);
-    lines.forEach((lineText, index) => {
+    const preservedLines = splitPreservedLines(normalizeMultilineText(annotation.content ?? '?餃??啁?')).slice(0, 2);
+    preservedLines.forEach((lineText, index) => {
       const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       text.setAttribute('x', rect.x + (rect.width / 2));
       text.setAttribute('y', rect.y + (rect.height * (index === 0 ? 0.42 : 0.74)));
@@ -1614,30 +1627,18 @@ export class AnnotationLayer {
     this.#redraw();
   }
 
-  #applyStructureChange({ type, pageNumber, afterPageNumber, fromPage, toPage }) {
+  #applyStructureChange({ type, pageNumber, afterPageNumber, fromPage, toPage, fromPages }) {
     const next = new Map();
-    for (const annotation of this.getAllAnnotations()) {
+    const remappedAnnotations = remapAnnotationsForStructureChange(this.getAllAnnotations(), {
+      type,
+      pageNumber,
+      afterPageNumber,
+      fromPage,
+      toPage,
+      fromPages,
+    });
+    for (const annotation of remappedAnnotations) {
       const cloned = this.#cloneAnnotation(annotation);
-
-      if (type === 'delete-page') {
-        if (cloned.pageNumber === pageNumber) continue;
-        if (cloned.pageNumber > pageNumber) cloned.pageNumber -= 1;
-      }
-
-      if (type === 'insert-page' && cloned.pageNumber > afterPageNumber) {
-        cloned.pageNumber += 1;
-      }
-
-      if (type === 'reorder-page') {
-        if (cloned.pageNumber === fromPage) {
-          cloned.pageNumber = toPage;
-        } else if (fromPage < toPage && cloned.pageNumber > fromPage && cloned.pageNumber <= toPage) {
-          cloned.pageNumber -= 1;
-        } else if (fromPage > toPage && cloned.pageNumber >= toPage && cloned.pageNumber < fromPage) {
-          cloned.pageNumber += 1;
-        }
-      }
-
       if (!next.has(cloned.pageNumber)) {
         next.set(cloned.pageNumber, []);
       }

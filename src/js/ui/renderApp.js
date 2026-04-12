@@ -7,6 +7,7 @@
 
 import { buildMenuModel, buildToolbarModel } from './ShellModel.js';
 import { eventBus } from '../core/EventBus.js';
+import { bindBufferedTextCommit } from '../core/TextFieldCommit.js';
 
 const WORD_THEME_COLORS = [
   { label: '黑色', value: '#000000' },
@@ -50,6 +51,7 @@ export class AppRenderer {
   #progressBar = document.getElementById('progress-bar');
   #progressLabel = document.getElementById('progress-label');
   #toastHost = document.getElementById('toast-host');
+  #inspectorBindings = [];
 
   #activeMenuId = null;
 
@@ -97,19 +99,18 @@ export class AppRenderer {
   }
 
   renderInspector(state, annotation = null) {
+    this.#releaseInspectorBindings();
     this.#inspector.innerHTML = '';
 
     const summary = document.createElement('section');
     summary.className = 'inspector-card';
-    summary.innerHTML = `
-      <div class="inspector-section-title">文件資訊</div>
-      <div class="inspector-grid">
-        <div class="inspector-field"><span>狀態</span><strong>${state.documentStatus}</strong></div>
-        <div class="inspector-field"><span>頁面</span><strong>${state.currentPage} / ${state.pageCount}</strong></div>
-        <div class="inspector-field"><span>縮放</span><strong>${Math.round((state.zoom ?? 1) * 100)}%</strong></div>
-        <div class="inspector-field"><span>工具</span><strong>${state.selectedTool}</strong></div>
-      </div>
-    `;
+    summary.appendChild(this.#buildSectionTitle('文件資訊'));
+    summary.appendChild(this.#buildInspectorGrid([
+      ['狀態', state.documentStatus],
+      ['頁面', `${state.currentPage} / ${state.pageCount}`],
+      ['縮放', `${Math.round((state.zoom ?? 1) * 100)}%`],
+      ['工具', state.selectedTool],
+    ]));
     this.#inspector.appendChild(summary);
 
     this.#inspector.appendChild(this.#buildToolHubTabs(state.toolHubTab ?? 'all-tools'));
@@ -119,21 +120,20 @@ export class AppRenderer {
     details.className = 'inspector-card';
 
     if (!annotation) {
-      details.innerHTML = `
-        <div class="inspector-section-title">格式與屬性</div>
-        <p class="inspector-empty">選取一個標註後，可在這裡調整文字、顏色、透明度與樣式。</p>
-      `;
+      details.appendChild(this.#buildSectionTitle('格式與屬性'));
+      const empty = document.createElement('p');
+      empty.className = 'inspector-empty';
+      empty.textContent = '選取一個標註後，可在這裡調整文字、顏色、透明度與樣式。';
+      details.appendChild(empty);
       this.#inspector.appendChild(details);
       return;
     }
 
-    details.innerHTML = `
-      <div class="inspector-section-title">標註屬性</div>
-      <div class="inspector-grid">
-        <div class="inspector-field"><span>類型</span><strong>${annotation.type}</strong></div>
-        <div class="inspector-field"><span>所在頁</span><strong>第 ${annotation.pageNumber} 頁</strong></div>
-      </div>
-    `;
+    details.appendChild(this.#buildSectionTitle('標註屬性'));
+    details.appendChild(this.#buildInspectorGrid([
+      ['類型', annotation.type],
+      ['所在頁', `第 ${annotation.pageNumber} 頁`],
+    ]));
 
     const controls = document.createElement('div');
     controls.className = 'inspector-controls';
@@ -143,11 +143,20 @@ export class AppRenderer {
       if (annotation.signerName) {
         const sigInfo = document.createElement('div');
         sigInfo.className = 'inspector-sig-info';
-        sigInfo.innerHTML = `
-          <div class="inspector-field"><span>簽署人</span><strong>${annotation.signerName}</strong></div>
-          ${annotation.signedAt ? `<div class="inspector-field"><span>簽署時間</span><strong>${new Date(annotation.signedAt).toLocaleString('zh-TW')}</strong></div>` : ''}
-          ${annotation.signatureType ? `<div class="inspector-field"><span>方式</span><strong>${annotation.signatureType === 'draw' ? '手繪' : annotation.signatureType === 'type' ? '輸入' : annotation.signatureType}</strong></div>` : ''}
-        `;
+        sigInfo.appendChild(this.#buildInspectorField('簽署人', annotation.signerName));
+        if (annotation.signedAt) {
+          sigInfo.appendChild(this.#buildInspectorField('簽署時間', new Date(annotation.signedAt).toLocaleString('zh-TW')));
+        }
+        if (annotation.signatureType) {
+          sigInfo.appendChild(this.#buildInspectorField(
+            '方式',
+            annotation.signatureType === 'draw'
+              ? '手繪'
+              : annotation.signatureType === 'type'
+                ? '輸入'
+                : annotation.signatureType,
+          ));
+        }
         controls.appendChild(sigInfo);
       }
       controls.appendChild(this.#buildRangeField('透明度', 'opacity', annotation.style?.opacity ?? 1, 0, 1, 0.05));
@@ -163,7 +172,7 @@ export class AppRenderer {
     }
 
     if (annotation.type === 'text' || annotation.type === 'stamp') {
-      controls.appendChild(this.#buildTextField('文字內容', annotation.content ?? ''));
+      controls.appendChild(this.#buildTextField('文字內容', annotation.content ?? '', annotation.id));
       controls.appendChild(this.#buildNumberField('字體大小', 'fontSize', annotation.style?.fontSize ?? 12, 8, 72));
     }
 
@@ -181,6 +190,7 @@ export class AppRenderer {
     controls.appendChild(hint);
 
     const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
     deleteButton.className = 'btn';
     deleteButton.textContent = '刪除標註';
     let confirmTimer = null;
@@ -336,10 +346,16 @@ export class AppRenderer {
         button.type = 'button';
         button.className = 'tool-hub-action';
         button.disabled = item.enabled === false;
-        button.innerHTML = `
-          <span class="tool-hub-action-label">${item.label}</span>
-          ${item.note ? `<span class="tool-hub-action-note">${item.note}</span>` : ''}
-        `;
+        const label = document.createElement('span');
+        label.className = 'tool-hub-action-label';
+        label.textContent = item.label;
+        button.appendChild(label);
+        if (item.note) {
+          const note = document.createElement('span');
+          note.className = 'tool-hub-action-note';
+          note.textContent = item.note;
+          button.appendChild(note);
+        }
         if (item.enabled !== false && item.action) {
           button.addEventListener('click', () => {
             eventBus.emit('ui:action', { action: item.action, value: item.value });
@@ -408,10 +424,15 @@ export class AppRenderer {
       itemEl.setAttribute('tabindex', '-1');
       itemEl.setAttribute('data-action', item.id);
       if (item.disabled) itemEl.setAttribute('disabled', '');
-      itemEl.innerHTML = `
-        <span>${item.label}</span>
-        ${item.shortcut ? `<span class="shortcut">${item.shortcut}</span>` : ''}
-      `;
+      const itemLabel = document.createElement('span');
+      itemLabel.textContent = item.label;
+      itemEl.appendChild(itemLabel);
+      if (item.shortcut) {
+        const shortcut = document.createElement('span');
+        shortcut.className = 'shortcut';
+        shortcut.textContent = item.shortcut;
+        itemEl.appendChild(shortcut);
+      }
       itemEl.addEventListener('click', (event) => {
         event.stopPropagation();
         if (!itemEl.hasAttribute('disabled')) {
@@ -476,11 +497,20 @@ export class AppRenderer {
 
     for (const tool of model.tools) {
       const btn = document.createElement('button');
+      btn.type = 'button';
       btn.className = 'tool-btn tool-btn--annotate' + (tool.active ? ' active' : '');
       btn.setAttribute('data-tool', tool.id);
       btn.setAttribute('aria-label', tool.label);
       btn.setAttribute('title', tool.label);
-      btn.innerHTML = `<span class="tool-btn-icon" aria-hidden="true">${tool.icon}</span><span class="tool-btn-label">${tool.label}</span>`;
+      const icon = document.createElement('span');
+      icon.className = 'tool-btn-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = tool.icon;
+      const label = document.createElement('span');
+      label.className = 'tool-btn-label';
+      label.textContent = tool.label;
+      btn.appendChild(icon);
+      btn.appendChild(label);
       if (tool.disabled) btn.setAttribute('disabled', '');
       btn.addEventListener('click', () => {
         eventBus.emit('ui:action', { action: `tool-${tool.id}` });
@@ -494,22 +524,60 @@ export class AppRenderer {
 
     const zoomControl = document.createElement('div');
     zoomControl.className = 'zoom-control';
-    zoomControl.innerHTML = `
-      <button class="tool-btn" data-action="zoom-out" aria-label="縮小" title="縮小 (Ctrl+-)">−</button>
-      <input id="zoom-input" class="zoom-input" type="text" value="${model.zoom.value}%"
-             aria-label="縮放比例" inputmode="numeric">
-      <button class="tool-btn" data-action="zoom-in" aria-label="放大" title="放大 (Ctrl+=)">+</button>
-    `;
+    const zoomOutButton = document.createElement('button');
+    zoomOutButton.type = 'button';
+    zoomOutButton.className = 'tool-btn';
+    zoomOutButton.setAttribute('data-action', 'zoom-out');
+    zoomOutButton.setAttribute('aria-label', '縮小');
+    zoomOutButton.setAttribute('title', '縮小 (Ctrl+-)');
+    zoomOutButton.textContent = '−';
+    const zoomInputEl = document.createElement('input');
+    zoomInputEl.id = 'zoom-input';
+    zoomInputEl.className = 'zoom-input';
+    zoomInputEl.type = 'text';
+    zoomInputEl.value = `${model.zoom.value}%`;
+    zoomInputEl.setAttribute('aria-label', '縮放比例');
+    zoomInputEl.setAttribute('inputmode', 'numeric');
+    const zoomInButton = document.createElement('button');
+    zoomInButton.type = 'button';
+    zoomInButton.className = 'tool-btn';
+    zoomInButton.setAttribute('data-action', 'zoom-in');
+    zoomInButton.setAttribute('aria-label', '放大');
+    zoomInButton.setAttribute('title', '放大 (Ctrl+=)');
+    zoomInButton.textContent = '+';
+    zoomControl.appendChild(zoomOutButton);
+    zoomControl.appendChild(zoomInputEl);
+    zoomControl.appendChild(zoomInButton);
     this.#toolbar.appendChild(zoomControl);
 
     const pageNav = document.createElement('div');
     pageNav.className = 'page-nav';
-    pageNav.innerHTML = `
-      <button class="tool-btn" data-action="page-prev" aria-label="上一頁">‹</button>
-      <input id="page-input" class="page-nav-input" type="text" value="${model.page.current}" aria-label="頁碼">
-      <span id="page-total" class="page-nav-total">/ ${model.page.total}</span>
-      <button class="tool-btn" data-action="page-next" aria-label="下一頁">›</button>
-    `;
+    const prevButton = document.createElement('button');
+    prevButton.type = 'button';
+    prevButton.className = 'tool-btn';
+    prevButton.setAttribute('data-action', 'page-prev');
+    prevButton.setAttribute('aria-label', '上一頁');
+    prevButton.textContent = '‹';
+    const pageInputEl = document.createElement('input');
+    pageInputEl.id = 'page-input';
+    pageInputEl.className = 'page-nav-input';
+    pageInputEl.type = 'text';
+    pageInputEl.value = model.page.current;
+    pageInputEl.setAttribute('aria-label', '頁碼');
+    const pageTotalEl = document.createElement('span');
+    pageTotalEl.id = 'page-total';
+    pageTotalEl.className = 'page-nav-total';
+    pageTotalEl.textContent = `/ ${model.page.total}`;
+    const nextButton = document.createElement('button');
+    nextButton.type = 'button';
+    nextButton.className = 'tool-btn';
+    nextButton.setAttribute('data-action', 'page-next');
+    nextButton.setAttribute('aria-label', '下一頁');
+    nextButton.textContent = '›';
+    pageNav.appendChild(prevButton);
+    pageNav.appendChild(pageInputEl);
+    pageNav.appendChild(pageTotalEl);
+    pageNav.appendChild(nextButton);
     this.#toolbar.appendChild(pageNav);
 
     this.#toolbar.addEventListener('click', (event) => {
@@ -556,6 +624,34 @@ export class AppRenderer {
     wrapper.appendChild(labelEl);
 
     return wrapper;
+  }
+
+  #buildSectionTitle(text) {
+    const title = document.createElement('div');
+    title.className = 'inspector-section-title';
+    title.textContent = text;
+    return title;
+  }
+
+  #buildInspectorGrid(fields = []) {
+    const grid = document.createElement('div');
+    grid.className = 'inspector-grid';
+    fields.forEach(([label, value]) => {
+      grid.appendChild(this.#buildInspectorField(label, value));
+    });
+    return grid;
+  }
+
+  #buildInspectorField(label, value) {
+    const field = document.createElement('div');
+    field.className = 'inspector-field';
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    const valueEl = document.createElement('strong');
+    valueEl.textContent = String(value ?? '');
+    field.appendChild(labelEl);
+    field.appendChild(valueEl);
+    return field;
   }
 
   #buildColorField(annotationType, value) {
@@ -654,20 +750,32 @@ export class AppRenderer {
     return wrapper;
   }
 
-  #buildTextField(label, value) {
+  #buildTextField(label, value, annotationId) {
     const wrapper = this.#buildFieldShell(label);
     const input = document.createElement('textarea');
     input.className = 'form-input inspector-textarea';
     input.value = value;
     input.rows = 3;
-    input.addEventListener('change', () => {
-      eventBus.emit('ui:action', {
-        action: 'update-selected-annotation',
-        patch: { content: input.value },
-      });
-    });
     wrapper.appendChild(input);
+    this.#inspectorBindings.push(bindBufferedTextCommit(input, {
+      documentTarget: document,
+      isInsideTarget: (target) => target === wrapper || Boolean(wrapper.contains?.(target)),
+      onCommit: (nextValue) => {
+        eventBus.emit('ui:action', {
+          action: 'update-selected-annotation',
+          annotationId,
+          patch: { content: nextValue },
+        });
+      },
+    }));
     return wrapper;
+  }
+
+  #releaseInspectorBindings() {
+    for (const binding of this.#inspectorBindings) {
+      binding.cleanup();
+    }
+    this.#inspectorBindings = [];
   }
 
   #bindGlobalEvents() {

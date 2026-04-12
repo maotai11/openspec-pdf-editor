@@ -44,6 +44,9 @@
 </head>
 <body>
 
+<!-- Skip navigation link for keyboard accessibility -->
+<a href="#editor-stage" class="skip-link">跳至主要內容</a>
+
 <div id="load-error" style="
   display:none; position:fixed; inset:0; background:#fff;
   flex-direction:column; align-items:center; justify-content:center;
@@ -65,7 +68,7 @@
 
     <main id="editor-stage" role="main" aria-label="PDF 編輯區" aria-dropeffect="copy">
       <div id="empty-state" aria-label="尚未開啟文件">
-        <div class="empty-state-icon">PDF</div>
+        <div class="empty-state-icon" aria-hidden="true">PDF</div>
         <div class="empty-state-title">開啟 PDF 後即可開始編輯</div>
         <div class="empty-state-hint">支援 PDF、PNG、JPG、WebP，單檔上限 150 MB</div>
         <button class="btn btn-primary" id="btn-open-pdf" aria-label="開啟 PDF">

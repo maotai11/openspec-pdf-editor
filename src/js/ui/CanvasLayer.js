@@ -99,6 +99,14 @@ export class CanvasLayer {
 
       const renderTime = Math.round(performance.now() - t0);
       eventBus.emit('page:rendered', { pageNumber, renderTime });
+
+      // 更新 aria-label 供螢幕閱讀器使用
+      const state = stateManager.state;
+      const zoomPct = Math.round(state.zoom * 100);
+      this.#root.setAttribute(
+        'aria-label',
+        `PDF 第 ${pageNumber} 頁，共 ${this.#engine.pageCount} 頁，縮放 ${zoomPct}%`
+      );
     } catch (err) {
       // RenderingCancelledException is expected when a render is superseded
       if (err?.name !== 'RenderingCancelledException') {

@@ -21,8 +21,11 @@ import {
   normalizeRectGeometry,
   rotatePoint,
 } from './AnnotationExport.js';
+import { resolveSafeCropBox } from './CropBox.js';
 import { resolveImageWatermarkLayout, resolvePageNumberLayout, resolveWatermarkLayout } from './LayoutPresets.js';
 import { embedImageFile } from './ImageAsset.js';
+import { normalizeMultilineText, splitPreservedLines } from './MultilineText.js';
+import { resolveTargetPageNumbers } from './PageSelection.js';
 import { getVisualViewport, visualEdgeInsetsToPdfEdgeInsets, visualLayoutPointToPdf } from './PageGeometry.js';
 import { buildTypedSignaturePreset } from './SignatureAsset.js';
 import { normalizeTextRun } from './TextMarkup.js';
@@ -30,6 +33,7 @@ import { normalizeTextRun } from './TextMarkup.js';
 const MAGIC_BYTES = '%PDF-';
 const MAX_FILE_BYTES  = 150 * 1024 * 1024; // 150 MB hard limit
 const WARN_FILE_BYTES = 100 * 1024 * 1024; // 100 MB soft warning
+const EXPORT_RASTER_SCALE = 4;
 
 class DocumentEngine {
   #pdfjsDoc  = null;
@@ -152,9 +156,95 @@ class DocumentEngine {
     }
   }
 
+  async openMergedFiles(files = []) {
+    const pdfFiles = Array.from(files ?? []).filter(Boolean);
+    if (pdfFiles.length === 0) return false;
+    if (pdfFiles.length === 1) {
+      await this.openFile(pdfFiles[0]);
+      return true;
+    }
+
+    eventBus.emit('document:open-requested', { files: pdfFiles });
+
+    const totalBytes = pdfFiles.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    if (totalBytes > MAX_FILE_BYTES) {
+      eventBus.emit('document:load-failed', {
+        reason: `選取檔案總大小 ${this.#formatSize(totalBytes)}，超過 150MB 上限。`,
+        code: 'FILE_TOO_LARGE',
+      });
+      return false;
+    }
+
+    if (totalBytes > WARN_FILE_BYTES) {
+      eventBus.emit('document:load-warning', {
+        message: `選取檔案總大小 ${this.#formatSize(totalBytes)}，載入與縮圖建立可能較久。`,
+      });
+    }
+
+    try {
+      const mergedDoc = await window.PDFLib.PDFDocument.create();
+
+      for (const file of pdfFiles) {
+        if (!this.#validateMime(file)) {
+          throw new Error(`"${file.name}" 不是可用的 PDF 檔案。`);
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        if (!this.#validateMagicBytes(arrayBuffer)) {
+          throw new Error(`"${file.name}" 不是有效的 PDF 檔案。`);
+        }
+
+        const donorDoc = await window.PDFLib.PDFDocument.load(arrayBuffer);
+        const pages = await mergedDoc.copyPages(donorDoc, donorDoc.getPageIndices());
+        for (const page of pages) mergedDoc.addPage(page);
+      }
+
+      const mergedBytes = await mergedDoc.save();
+      const mergedBuffer = mergedBytes.buffer.slice(
+        mergedBytes.byteOffset,
+        mergedBytes.byteOffset + mergedBytes.byteLength,
+      );
+      const fileName = this.#buildMergedFileName(pdfFiles);
+      const lastModified = Math.max(...pdfFiles.map((file) => Number(file.lastModified) || 0), 0) || null;
+      const [pdfjsDoc, pdfLibDoc, hash] = await Promise.all([
+        this.#loadWithPdfJs(mergedBytes),
+        this.#loadWithPdfLib(mergedBuffer),
+        this.#computeHash(mergedBuffer),
+      ]);
+
+      this.#pdfjsDoc = pdfjsDoc;
+      this.#pdfLibDoc = pdfLibDoc;
+      this.#pdfBytes = mergedBuffer;
+      this.#fileHash = hash;
+      this.#fileName = fileName;
+      this.#fileLastModified = lastModified;
+      this.#clearPageTextCache();
+
+      eventBus.emit('document:loaded', {
+        pageCount: pdfjsDoc.numPages,
+        fileName,
+        fileHash: hash,
+        currentPage: 1,
+        source: 'open',
+      });
+      return true;
+    } catch (err) {
+      console.error('[DocumentEngine] Multi-file open failed:', err);
+      eventBus.emit('document:load-failed', {
+        reason: `批量開啟 PDF 失敗：${err.message ?? '未知錯誤'}`,
+        code: 'PARSE_ERROR',
+      });
+      return false;
+    }
+  }
+
   async getPage(pageNumber) {
     if (!this.#pdfjsDoc) throw new Error('No document loaded.');
-    return this.#pdfjsDoc.getPage(pageNumber);
+    const normalizedPageNumber = Math.trunc(Number(pageNumber));
+    if (!Number.isFinite(normalizedPageNumber) || normalizedPageNumber < 1 || normalizedPageNumber > this.pageCount) {
+      throw new Error(`Page ${pageNumber} is out of range.`);
+    }
+    return this.#pdfjsDoc.getPage(normalizedPageNumber);
   }
 
   async createSnapshotBytes() {
@@ -276,6 +366,12 @@ class DocumentEngine {
     return `${(bytes / 1024).toFixed(0)} KB`;
   }
 
+  #buildMergedFileName(files = []) {
+    const firstName = String(files[0]?.name ?? 'merged.pdf');
+    const baseName = firstName.replace(/\.pdf$/i, '');
+    return `${baseName}_merged.pdf`;
+  }
+
   /**
    * Embed annotations into a pdf-lib doc (private helper used by exportToBlob).
    */
@@ -377,8 +473,8 @@ class DocumentEngine {
             if (await this.#drawTextAnnotationAsImage(pdfDoc, page, ann, box)) {
               continue;
             }
-            const text = String(ann.content ?? '');
-            if (!text) continue;
+            const text = normalizeMultilineText(ann.content ?? '');
+            if (text.length === 0) continue;
             const c = this.#hexToRgb(ann.style?.color ?? '#000000');
             const fontSize = ann.style?.fontSize ?? 12;
             const lineHeight = fontSize * 1.2;
@@ -391,7 +487,7 @@ class DocumentEngine {
               0,
               fontSize,
             );
-            const lines = text.split(/\r?\n/).filter(Boolean);
+            const lines = splitPreservedLines(text);
             const lineLayouts = buildTextLineLayouts({
               anchor,
               lineWidths: lines.map((line) => textFont.widthOfTextAtSize(line, fontSize)),
@@ -447,10 +543,11 @@ class DocumentEngine {
             const rotation = normalizeAnnotationRotation(ann.style?.rotation ?? 0);
             const fontSize = ann.style?.fontSize ?? Math.max(11, Math.min(g.width, g.height) * 0.16);
             const lines = String(ann.content ?? '電子印章').split(/\r?\n/).filter(Boolean).slice(0, 2);
+            const preservedLines = splitPreservedLines(normalizeMultilineText(ann.content ?? '?餃??啁?')).slice(0, 2);
             const lineHeight = Math.max(fontSize * 1.2, g.height * 0.32);
             const stampLayout = buildStampExportLayout(g, {
               rotation,
-              lineWidths: lines.map((line) => textFont.widthOfTextAtSize(line, fontSize)),
+              lineWidths: preservedLines.map((line) => textFont.widthOfTextAtSize(line, fontSize)),
               lineHeight,
             });
             page.drawEllipse({
@@ -473,7 +570,7 @@ class DocumentEngine {
             {
             const lines = String(ann.content ?? '電子印章').split(/\r?\n/).filter(Boolean).slice(0, 2);
             const fontSize = ann.style?.fontSize ?? Math.max(11, Math.min(g.width, g.height) * 0.16);
-            lines.forEach((line, index) => {
+            preservedLines.forEach((line, index) => {
               if (!line) return;
               const point = stampLayout.textLines[index] ?? stampLayout.textLines[stampLayout.textLines.length - 1];
               if (!point) return;
@@ -499,8 +596,8 @@ class DocumentEngine {
   }
 
   async #drawTextAnnotationAsImage(pdfDoc, page, annotation, box) {
-    const text = String(annotation.content ?? '').trim();
-    if (!text) return false;
+    const text = normalizeMultilineText(annotation.content ?? '');
+    if (text.length === 0) return false;
 
     try {
       const fontSize = annotation.style?.fontSize ?? 12;
@@ -517,7 +614,7 @@ class DocumentEngine {
         0,
         fontSize,
       );
-      const lines = text.split(/\r?\n/).filter(Boolean);
+      const lines = splitPreservedLines(text);
       const metrics = this.#measurePreviewTextLines(lines, fontSize);
       const corners = [
         { x: 0, y: -metrics.ascent },
@@ -542,7 +639,7 @@ class DocumentEngine {
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, bounds.width, bounds.height, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, bounds.width, bounds.height, EXPORT_RASTER_SCALE);
       const image = await pdfDoc.embedPng(pngBytes);
       page.drawImage(image, {
         x: anchor.x + bounds.minX,
@@ -571,6 +668,7 @@ class DocumentEngine {
       const strokeWidth = annotation.style?.strokeWidth ?? 1.5;
       const fontSize = annotation.style?.fontSize ?? Math.max(11, Math.min(g.width, g.height) * 0.16);
       const lines = String(annotation.content ?? '電子印章').split(/\r?\n/).filter(Boolean).slice(0, 2);
+      const preservedLines = splitPreservedLines(normalizeMultilineText(annotation.content ?? '?餃??啁?')).slice(0, 2);
       const center = { x: g.width / 2, y: g.height / 2 };
       const bounds = this.#getPointBounds([
         { x: 0, y: 0 },
@@ -579,7 +677,7 @@ class DocumentEngine {
         { x: 0, y: g.height },
       ].map((point) => rotatePoint(point, center, rotation)));
       // Mirror AnnotationLayer#buildStampElement proportions exactly
-      const hasDate = lines.length > 1;
+      const hasDate = preservedLines.length > 1;
       const line1Y = hasDate ? g.height * 0.42 : g.height * 0.54;
       const line2Y = g.height * 0.74;
       const dividerY = g.height * 0.56;
@@ -600,7 +698,7 @@ class DocumentEngine {
         ' font-weight="600"',
         ' text-anchor="middle"',
         ' dominant-baseline="middle"',
-        ` xml:space="preserve">${this.#escapeSvgText(lines[0])}</text>`,
+        ` xml:space="preserve">${this.#escapeSvgText(preservedLines[0] ?? '')}</text>`,
         hasDate ? [
           `<text x="${center.x}" y="${line2Y}"`,
           ` fill="${color}"`,
@@ -608,13 +706,13 @@ class DocumentEngine {
           ' font-family="Microsoft JhengHei, PingFang TC, system-ui, sans-serif"',
           ' text-anchor="middle"',
           ' dominant-baseline="middle"',
-          ` xml:space="preserve">${this.#escapeSvgText(lines[1])}</text>`,
+          ` xml:space="preserve">${this.#escapeSvgText(preservedLines[1] ?? '')}</text>`,
         ].join('') : '',
         '</g>',
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, EXPORT_RASTER_SCALE);
       const image = await pdfDoc.embedPng(pngBytes);
       // 錨點依 pageRot 計算
       let ax, ay, drawW, drawH;
@@ -689,7 +787,7 @@ class DocumentEngine {
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, svgW, svgH, EXPORT_RASTER_SCALE);
       const image = await pdfDoc.embedPng(pngBytes);
       // 錨點依 pageRot 計算
       let ax, ay, drawW, drawH;
@@ -773,7 +871,7 @@ class DocumentEngine {
           : '',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, block.width, block.height, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, block.width, block.height, EXPORT_RASTER_SCALE);
       const image = await pdfDoc.embedPng(pngBytes);
       const origin = visualLayoutPointToPdf({
         x: block.x,
@@ -812,7 +910,7 @@ class DocumentEngine {
 
     try {
       const lineHeight = layout.lineHeight || (fontSize * 0.9);
-      const lines = String(text ?? '').split('\n').filter(Boolean);
+      const lines = splitPreservedLines(text);
       const centerX = layout.width / 2;
       const centerY = layout.height / 2;
       const blockTop = centerY - ((Math.max(lines.length, 1) - 1) * lineHeight / 2);
@@ -833,7 +931,7 @@ class DocumentEngine {
         '</g>',
         '</svg>',
       ].join('');
-      const pngBytes = await this.#svgMarkupToPngBytes(svg, layout.width, layout.height, 3);
+      const pngBytes = await this.#svgMarkupToPngBytes(svg, layout.width, layout.height, EXPORT_RASTER_SCALE);
       const image = await pdfDoc.embedPng(pngBytes);
       const origin = visualLayoutPointToPdf({
         x: layout.x,
@@ -900,7 +998,7 @@ class DocumentEngine {
     };
   }
 
-  async #svgMarkupToPngBytes(svgMarkup, width, height, scale = 2) {
+  async #svgMarkupToPngBytes(svgMarkup, width, height, scale = EXPORT_RASTER_SCALE) {
     const svgBlob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
     const svgUrl = URL.createObjectURL(svgBlob);
 
@@ -916,6 +1014,8 @@ class DocumentEngine {
       canvas.width = Math.max(1, Math.ceil(width * scale));
       canvas.height = Math.max(1, Math.ceil(height * scale));
       const context = canvas.getContext('2d');
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
       context.scale(scale, scale);
       context.drawImage(image, 0, 0, width, height);
 
@@ -1028,7 +1128,9 @@ class DocumentEngine {
   async rotatePages(options = {}, currentPage = 1) {
     if (!this.#pdfLibDoc) throw new Error('No document loaded.');
     const { degrees = 90 } = options;
-    for (const pageNumber of this.#resolveTargetPages(options, currentPage)) {
+    const targetPages = this.#resolveTargetPages(options, currentPage);
+    if (targetPages.length === 0) throw new Error('No valid pages selected.');
+    for (const pageNumber of targetPages) {
       const page = this.#pdfLibDoc.getPage(pageNumber - 1);
       const current = page.getRotation().angle;
       page.setRotation(window.PDFLib.degrees((current + degrees) % 360));
@@ -1038,7 +1140,9 @@ class DocumentEngine {
 
   async cropPages(options = {}, currentPage = 1) {
     if (!this.#pdfLibDoc) throw new Error('No document loaded.');
-    for (const pageNumber of this.#resolveTargetPages(options, currentPage)) {
+    const targetPages = this.#resolveTargetPages(options, currentPage);
+    if (targetPages.length === 0) throw new Error('No valid pages selected.');
+    for (const pageNumber of targetPages) {
       const page = this.#pdfLibDoc.getPage(pageNumber - 1);
       const box = this.#getPageBox(page);
       const visualViewport = this.#getVisualPageViewport(page, box);
@@ -1049,13 +1153,8 @@ class DocumentEngine {
         left: Math.max(0, Number(options.trimLeftPt) || 0),
       };
       const pdfInsets = visualEdgeInsetsToPdfEdgeInsets(visualInsets, visualViewport);
-      const trimLeft = pdfInsets.left;
-      const trimRight = pdfInsets.right;
-      const trimTop = pdfInsets.top;
-      const trimBottom = pdfInsets.bottom;
-      const width = Math.max(36, box.width - trimLeft - trimRight);
-      const height = Math.max(36, box.height - trimTop - trimBottom);
-      page.setCropBox(box.x + trimLeft, box.y + trimBottom, width, height);
+      const cropBox = resolveSafeCropBox(box, pdfInsets, 36);
+      page.setCropBox(cropBox.x, cropBox.y, cropBox.width, cropBox.height);
     }
     await this.#reloadFromPdfLib(currentPage);
   }
@@ -1218,6 +1317,7 @@ class DocumentEngine {
         }).format(new Date()).replace(/\//g, '-'))
       : '';
     const targetPages = this.#resolveTargetPages(options, currentPage);
+    if (targetPages.length === 0) throw new Error('No valid pages selected.');
     let visibleIndex = 0;
 
     for (const pageNumber of targetPages) {
@@ -1313,7 +1413,9 @@ class DocumentEngine {
         }).format(new Date()).replace(/\//g, '-')}`
       : text;
 
-    for (const pageNumber of this.#resolveTargetPages(options, currentPage)) {
+    const targetPages = this.#resolveTargetPages(options, currentPage);
+    if (targetPages.length === 0) throw new Error('No valid pages selected.');
+    for (const pageNumber of targetPages) {
       const page = this.#pdfLibDoc.getPage(pageNumber - 1);
       const box = this.#getPageBox(page);
       const visualViewport = this.#getVisualPageViewport(page, box);
@@ -1404,17 +1506,7 @@ class DocumentEngine {
   }
 
   #resolveTargetPages(options = {}, fallbackCurrentPage = 1) {
-    const pageCount = this.#pdfLibDoc.getPageCount();
-    if (Array.isArray(options.pages) && options.pages.length > 0) {
-      return [...new Set(options.pages
-        .map((pageNumber) => Math.trunc(Number(pageNumber)))
-        .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount))]
-        .sort((left, right) => left - right);
-    }
-
-    const fromPage = Math.min(Math.max(Math.trunc(Number(options.fromPage) || fallbackCurrentPage), 1), pageCount);
-    const toPage = Math.min(Math.max(Math.trunc(Number(options.toPage) || fromPage), fromPage), pageCount);
-    return Array.from({ length: toPage - fromPage + 1 }, (_, index) => fromPage + index);
+    return resolveTargetPageNumbers(this.#pdfLibDoc.getPageCount(), options, fallbackCurrentPage);
   }
 
   #getPageBox(page) {

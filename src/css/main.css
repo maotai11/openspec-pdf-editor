@@ -17,17 +17,17 @@
   --color-accent-hover:   oklch(48% 0.22 260);
   --color-accent-subtle:  oklch(93% 0.06 260);
   --color-danger:         oklch(55% 0.22 25);
-  --color-warning:        oklch(72% 0.18 80);
+  --color-warning:        oklch(60% 0.18 80);
   --color-success:        oklch(60% 0.18 145);
 
   /* Text */
   --color-text-primary:   oklch(18% 0.01 260);
   --color-text-secondary: oklch(45% 0.01 260);
-  --color-text-muted:     oklch(65% 0.008 260);
+  --color-text-muted:     oklch(55% 0.01 260);
   --color-text-on-accent: oklch(100% 0 0);
 
   /* Border */
-  --color-border:         oklch(88% 0.008 260);
+  --color-border:         oklch(80% 0.01 260);
   --color-border-strong:  oklch(75% 0.01 260);
   --color-border-focus:   var(--color-accent);
 
@@ -90,10 +90,10 @@
 
   --color-text-primary:   oklch(92% 0.005 260);
   --color-text-secondary: oklch(70% 0.008 260);
-  --color-text-muted:     oklch(52% 0.006 260);
+  --color-text-muted:     oklch(58% 0.006 260);
   --color-text-on-accent: oklch(10% 0.01 260);
 
-  --color-border:         oklch(28% 0.01 260);
+  --color-border:         oklch(35% 0.012 260);
   --color-border-strong:  oklch(38% 0.012 260);
 }
 
@@ -227,8 +227,9 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 4px 8px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -1069,7 +1070,38 @@ html, body {
 .form-input:focus {
   outline: none;
   border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 2px var(--color-accent-subtle);
+  box-shadow: 0 0 0 3px var(--color-accent-subtle), 0 0 0 1.5px var(--color-accent);
+}
+
+/* ---- Enhanced Focus Styles for Accessibility ---- */
+*:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px var(--color-accent-subtle);
+}
+
+/* Skip to content link */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  padding: 8px 16px;
+  z-index: 10000;
+  font-size: var(--text-md);
+  text-decoration: none;
+  border-radius: 0 0 var(--radius-sm) 0;
+  transition: top 0.15s ease;
+}
+.skip-link:focus {
+  top: 0;
 }
 
 /* ---- Preview Zoom Lightbox ---- */

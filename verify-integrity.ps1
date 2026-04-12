@@ -29,5 +29,9 @@ foreach ($prop in $manifest.files.PSObject.Properties) {
 }
 
 Write-Host ""
-Write-Host "Result: $pass OK, $fail FAILED" -ForegroundColor ($fail -eq 0 ? 'Green' : 'Red')
+$resultColor = 'Red'
+if ($fail -eq 0) {
+    $resultColor = 'Green'
+}
+Write-Host "Result: $pass OK, $fail FAILED" -ForegroundColor $resultColor
 if ($fail -gt 0) { exit 1 }
